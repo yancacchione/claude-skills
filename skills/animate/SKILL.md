@@ -311,6 +311,275 @@ void main() {
 
 ---
 
+## Kinetic Typography & Generative ASCII (Kinetic Mode)
+
+Activate this mode when the user mentions kinetic text, ASCII art, character animation, scramble effects, text particles, generative typography, or wants text that behaves like a material rather than a label.
+
+### Vocabulary
+
+| Term | Meaning |
+|------|--------|
+| **Character split** | Breaking a string into individually animatable `<span>` elements per char, word, or line |
+| **Brightness ramp** | A string of ASCII chars ordered by visual density, used to map pixel brightness → glyph (e.g. `" .:-=+*#%@"`) |
+| **Scramble** | Randomizing characters before they resolve to final text — creates a decode/reveal feel |
+| **Typewriter** | Sequential character reveal, left to right, with optional cursor blink |
+| **Kinetic** | Text whose individual characters move with physics, noise, or gesture |
+| **Particle text** | Characters or points distributed along the outline of letterforms, then animated as a particle system |
+| **SDF text** | Signed Distance Field — encodes glyph shapes in a texture; allows sharp rendering at any scale and GPU-side distortion |
+| **Flow field** | A grid of vectors (usually noise-driven) that steers particles or characters as they move |
+| **ASCII post-processing** | Rendering a scene normally, then mapping each block of pixels to an ASCII character in a post-processing pass |
+| **Noise field ASCII** | Using simplex/Perlin noise to drive brightness → char mapping across a grid, animated over time |
+| **Character rain** | Columns of falling random characters — each column advances independently, trails fade with low-alpha background |
+| **Morph** | Transitioning between two text strings by interpolating character positions (requires same char count or padding) |
+| **Glyph outline** | The vector path defining a character's shape — used as source geometry for particle or stroke animation |
+| **Text-to-points** | Sampling points along a glyph outline for use as particle targets (p5.js `textToPoints()`, opentype.js) |
+| **Variable font axis** | Animatable font axes like `wght`, `wdth`, `slnt` — enables smooth morphing between font weights/widths in CSS |
+
+---
+
+### ASCII: The Core Algorithm
+
+Everything ASCII starts here — map pixel brightness to a character:
+
+```js
+const RAMP = ' .\'`^",:;Il!i><~+_-?][}{1)(|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$'
+// denser string = finer gradation; shorter = more graphic/abstract
+
+function brightnessToChar(r, g, b, ramp = RAMP) {
+  const brightness = (r * 0.299 + g * 0.587 + b * 0.114) / 255
+  return ramp[Math.floor(brightness * (ramp.length - 1))]
+}
+```
+
+**DOM-based renderer** (canvas → `<pre>`) — works anywhere, great for generative pieces:
+
+```js
+function renderAscii(source, pre, cols = 80) {
+  const offscreen = document.createElement('canvas')
+  const ctx = offscreen.getContext('2d')
+  const aspect = source.videoHeight / source.videoWidth || 1
+  const rows = Math.floor(cols * aspect * 0.45) // chars are ~2× taller than wide
+  offscreen.width = cols
+  offscreen.height = rows
+  ctx.drawImage(source, 0, 0, cols, rows)
+  const { data } = ctx.getImageData(0, 0, cols, rows)
+  let out = ''
+  for (let i = 0; i < data.length; i += 4) {
+    out += brightnessToChar(data[i], data[i+1], data[i+2])
+    if ((i / 4 + 1) % cols === 0) out += '\n'
+  }
+  pre.textContent = out
+}
+// call on requestAnimationFrame for live video/canvas sources
+```
+
+**Noise-field ASCII** — no source image needed, fully generative:
+
+```js
+import { createNoise2D } from 'simplex-noise'
+const noise2D = createNoise2D()
+
+function drawNoiseAscii(pre, cols, rows, t) {
+  let out = ''
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const n = (noise2D(x * 0.06 + t * 0.3, y * 0.12) + 1) / 2 // 0–1
+      out += RAMP[Math.floor(n * (RAMP.length - 1))]
+    }
+    out += '\n'
+  }
+  pre.textContent = out
+}
+```
+
+**Three.js AsciiEffect** — post-process a whole 3D scene:
+
+```js
+import { AsciiEffect } from 'three/addons/effects/AsciiEffect.js'
+
+const effect = new AsciiEffect(renderer, ' .:-=+*#%@', { invert: true })
+effect.setSize(window.innerWidth, window.innerHeight)
+effect.domElement.style.color = 'white'
+document.body.appendChild(effect.domElement)
+
+function animate() {
+  requestAnimationFrame(animate)
+  effect.render(scene, camera) // replaces renderer.render()
+}
+```
+
+**GLSL ASCII in a shader** — encodes char index into a lookup texture, fully GPU-side:
+
+```glsl
+// Fragment — sample scene texture, map brightness to char row in a font atlas
+uniform sampler2D uScene;
+uniform sampler2D uFontAtlas; // each row = one ASCII char rendered at charSize
+uniform vec2 uResolution;
+uniform float uCharSize; // e.g. 8.0 px
+
+void main() {
+  vec2 cell = floor(gl_FragCoord.xy / uCharSize);
+  vec2 cellUV = cell * uCharSize / uResolution;
+  vec4 color = texture2D(uScene, cellUV);
+  float brightness = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+  float charIndex = floor(brightness * 9.0); // 10-char ramp
+  vec2 subUV = mod(gl_FragCoord.xy, uCharSize) / uCharSize;
+  subUV.y = (charIndex + subUV.y) / 10.0;
+  gl_FragColor = texture2D(uFontAtlas, subUV);
+}
+```
+
+---
+
+### Kinetic Typography Patterns
+
+**1. Character split — the foundation**
+
+Manual split (no dependency):
+```js
+const split = (el) => {
+  el.innerHTML = [...el.textContent]
+    .map(c => `<span style="display:inline-block">${c === ' ' ? '&nbsp;' : c}</span>`)
+    .join('')
+  return el.querySelectorAll('span')
+}
+const chars = split(document.querySelector('h1'))
+```
+
+With GSAP SplitText (cleanest, handles ligatures):
+```js
+const split = new SplitText('h1', { type: 'chars,words,lines' })
+gsap.from(split.chars, { y: '110%', opacity: 0, stagger: 0.02, ease: 'power3.out' })
+```
+
+**2. Scramble / decode reveal**
+
+```js
+const CHARS = '!@#$%^&*01アイウエオ'
+function scramble(el, finalText, duration = 1200) {
+  const len = finalText.length
+  let frame = 0
+  const totalFrames = duration / 16
+  const id = setInterval(() => {
+    el.textContent = [...finalText].map((ch, i) => {
+      if (frame / totalFrames > i / len) return ch // resolved
+      return CHARS[Math.floor(Math.random() * CHARS.length)]
+    }).join('')
+    if (++frame >= totalFrames) clearInterval(id)
+  }, 16)
+}
+// Or with GSAP ScrambleText plugin:
+gsap.to('h1', { duration: 1.5, scrambleText: { text: 'HELLO', chars: '01!アイ', revealDelay: 0.3 } })
+```
+
+**3. Variable font kinetic animation**
+
+```css
+@keyframes weightWave {
+  0%, 100% { font-variation-settings: 'wght' 100, 'wdth' 75; }
+  50%       { font-variation-settings: 'wght' 900, 'wdth' 125; }
+}
+.word span { animation: weightWave 2s ease-in-out infinite; }
+.word span:nth-child(n) { animation-delay: calc(n * 0.1s); }
+```
+
+```js
+// JS-driven per-char variable font via noise
+chars.forEach((span, i) => {
+  const n = (noise2D(i * 0.5, t) + 1) / 2
+  span.style.fontVariationSettings = `'wght' ${100 + n * 800}`
+})
+```
+
+**4. Particle text — characters flow to letterform outlines**
+
+```js
+// p5.js: textToPoints gives outline sample coords
+const pts = font.textToPoints('Y', -60, 20, 200, { sampleFactor: 0.15 })
+
+// Animate particles toward their target point (attractor)
+particles.forEach((p, i) => {
+  const target = pts[i % pts.length]
+  p.vx += (target.x - p.x) * 0.05
+  p.vy += (target.y - p.y) * 0.05
+  p.vx *= 0.85; p.vy *= 0.85 // damping
+  p.x += p.vx; p.y += p.vy
+  // draw p as a dot or ASCII char
+})
+```
+
+**5. Wave / sine motion**
+
+```js
+// Per-character sine wave — stagger phase by index
+chars.forEach((span, i) => {
+  const y = Math.sin(t * 2 + i * 0.4) * 8 // 8px amplitude
+  span.style.transform = `translateY(${y}px)`
+})
+```
+
+**6. Flow field text** — characters drift through a vector field:
+
+```js
+// Each char has position + velocity; velocity is set by noise at that position
+function flowAngle(x, y, t) {
+  return noise2D(x * 0.003, y * 0.003 + t * 0.001) * Math.PI * 4
+}
+chars.forEach(p => {
+  const angle = flowAngle(p.x, p.y, t)
+  p.x += Math.cos(angle) * p.speed
+  p.y += Math.sin(angle) * p.speed
+  // wrap at edges, render char at p.x, p.y
+})
+```
+
+**7. Character rain (Matrix-style)**
+
+```js
+function initRain(canvas) {
+  const ctx = canvas.getContext('2d')
+  const size = 14
+  const cols = Math.floor(canvas.width / size)
+  const drops = Array.from({ length: cols }, () => Math.random() * -100)
+  const chars = 'アイウエオカキクケコ0123456789ABCDEF'
+
+  return function draw() {
+    ctx.fillStyle = 'rgba(0,0,0,0.05)'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.fillStyle = '#00ff41'
+    ctx.font = `${size}px monospace`
+    drops.forEach((y, i) => {
+      ctx.fillText(chars[Math.floor(Math.random() * chars.length)], i * size, y * size)
+      if (y * size > canvas.height && Math.random() > 0.975) drops[i] = 0
+      drops[i] += 1
+    })
+  }
+}
+```
+
+---
+
+### Render Targets for Kinetic ASCII
+
+| Render target | Best for | Notes |
+|---------------|----------|-------|
+| `<pre>` + `textContent` | Generative noise fields, video ASCII | Simple, fast, easy to style with CSS color/mix-blend-mode |
+| Canvas 2D `fillText` | Rain, particle text, flow fields | Full control over color per char |
+| DOM `<span>` grid | Kinetic per-char animations, CSS transitions | CSS variable font axis animatable |
+| WebGL texture atlas | GPU ASCII post-processing, shader-driven | Fastest at scale, hardest to set up |
+| SVG `<text>` + GSAP | Path-following text, morphing letterforms | Best for precise control of text-on-path |
+
+### Aesthetic Decisions
+
+- **Ramp density** controls how graphic or photographic the output looks. Short ramps (`" .:#@"`) = high contrast, graphic. Long ramps = photographic, smooth.
+- **Invert the ramp** for dark-on-light output: `ramp.split('').reverse().join('')`
+- **Color** the ASCII: map hue from the source pixel's color instead of just brightness. Or use a single accent color with `mix-blend-mode: screen` over a dark background.
+- **Scale the grid**: fewer columns = more abstract / brutal. More = representational.
+- **Monospace is non-negotiable** — proportional fonts break the grid alignment.
+- **Char aspect ratio correction**: multiply rows by ~0.45 because monospace chars are roughly twice as tall as wide.
+
+---
+
 ## Output Format
 
 When building an animation, always:
