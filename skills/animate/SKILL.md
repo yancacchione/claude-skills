@@ -238,6 +238,7 @@ gsap.from(chars, { opacity: 0, y: '100%', stagger: 0.03, ease: 'power3.out' })
 ```tsx
 import Animated, { useSharedValue, useAnimatedStyle,
   withSpring, withTiming, FadeIn, FadeOut } from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
 
 // Shared value → animated style
 const scale = useSharedValue(1)
@@ -247,12 +248,19 @@ const onPress = () => { scale.value = withSpring(0.95, { damping: 15 }) }
 // Layout entry/exit
 <Animated.View entering={FadeIn.duration(300)} exiting={FadeOut.duration(200)}>
 
-// Gesture-driven
+// Gesture-driven (RNGH v2 — useAnimatedGestureHandler is deprecated)
 const translateX = useSharedValue(0)
-const gestureHandler = useAnimatedGestureHandler({
-  onActive: (e) => { translateX.value = e.translationX },
-  onEnd: () => { translateX.value = withSpring(0) }
-})
+const pan = Gesture.Pan()
+  .onUpdate((e) => { translateX.value = e.translationX })
+  .onEnd(() => { translateX.value = withSpring(0) })
+
+// In JSX:
+<GestureDetector gesture={pan}>
+  <Animated.View style={animatedStyle} />
+</GestureDetector>
+
+// Simultaneous gestures (pinch + pan)
+const composed = Gesture.Simultaneous(Gesture.Pinch(), pan)
 ```
 
 ### Moti (Expo — simpler Reanimated 3 wrapper)
@@ -297,6 +305,164 @@ void main() {
 | Number count-up | GSAP `gsap.to(obj, { val })` | ease-out, duration matched to magnitude |
 | Text character reveal | GSAP SplitText or manual split | stagger 0.02–0.04s, power3.out |
 | Ink/grain texture | GLSL fragment shader | `uTime`-driven noise, low alpha overlay |
+
+---
+
+## Audio-Reactive Animation
+
+Activate when: "audio reactive", "sound visualizer", "beat-driven", "amplitude", "frequency", or any animation that responds to microphone or audio playback.
+
+### Web — WebAudio API
+
+```js
+async function initAudio() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+  const ctx = new AudioContext()
+  const source = ctx.createMediaStreamSource(stream)
+  const analyser = ctx.createAnalyser()
+  analyser.fftSize = 256 // 128 frequency bins; lower = coarser but faster
+  source.connect(analyser)
+
+  const data = new Uint8Array(analyser.frequencyBinCount)
+
+  function tick() {
+    analyser.getByteFrequencyData(data) // 0–255 per bin
+    const bass   = avg(data.slice(0, 4))   / 255 // sub-bass ~0–200hz
+    const mid    = avg(data.slice(4, 32))  / 255 // mids
+    const treble = avg(data.slice(32, 64)) / 255 // highs
+    // use bass/mid/treble as 0–1 scalars to drive transforms, opacity, etc.
+    requestAnimationFrame(tick)
+  }
+  tick()
+}
+
+const avg = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length
+```
+
+**Driving CSS/DOM from audio:**
+```js
+// Scale an element with bass
+el.style.transform = `scale(${1 + bass * 0.4})`
+
+// Drive GLSL uniform
+uniforms.uBass.value = bass
+
+// Drive Framer Motion with `useMotionValue` + `set()`
+bassMotion.set(bass)
+```
+
+**Driving a Three.js scene:**
+```js
+// In useFrame or rAF:
+analyser.getByteFrequencyData(data)
+mesh.scale.setScalar(1 + avg(data.slice(0, 8)) / 255 * 2)
+material.uniforms.uBass.value = avg(data.slice(0, 4)) / 255
+```
+
+### React Native — Expo AV metering
+
+Full FFT isn't available natively in RN. Use amplitude metering for beat-driven effects:
+
+```tsx
+import { Audio } from 'expo-av'
+
+const { recording } = await Audio.Recording.createAsync(
+  { ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true }
+)
+
+recording.setOnRecordingStatusUpdate((status) => {
+  if (!status.metering) return
+  // metering is in dBFS, roughly -160 (silence) to 0 (max)
+  const level = Math.max(0, (status.metering + 60) / 60) // normalize to 0–1
+  amplitude.value = withSpring(level, { damping: 10 })
+})
+```
+
+### Aesthetic principles for audio-reactive work
+
+- **Lag/smoothing**: raw FFT data is jittery — smooth with `lerp(prev, current, 0.15)` or exponential moving average. Instant response feels broken.
+- **Non-linear mapping**: `Math.pow(bass, 2)` makes quiet moments calm and loud moments explosive. Linear is boring.
+- **Frequency-to-visual mapping**: bass → scale/position, mids → color/brightness, treble → detail/texture — this maps naturally to how humans perceive music.
+- **Avoid full-screen flashing** — it's nauseating and inaccessible. Scale, position, and opacity are safer than flipping background colors.
+
+---
+
+## Real-Time Camera / Canvas Effects
+
+Activate when: "camera filter", "greenscreen", "pixelate", "photobooth", "live video effect", "canvas from webcam".
+
+```js
+// Setup: stream webcam into a <video>, render to canvas each frame
+const video = document.querySelector('video')
+const canvas = document.querySelector('canvas')
+const ctx = canvas.getContext('2d')
+navigator.mediaDevices.getUserMedia({ video: true })
+  .then(stream => { video.srcObject = stream; video.play() })
+
+function tick() {
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+  const frame = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  applyEffect(frame)
+  ctx.putImageData(frame, 0, 0)
+  requestAnimationFrame(tick)
+}
+```
+
+**Pixelation:**
+```js
+function pixelate(ctx, blockSize = 10) {
+  const { width, height } = ctx.canvas
+  ctx.imageSmoothingEnabled = false
+  const tmpCanvas = document.createElement('canvas')
+  tmpCanvas.width = width / blockSize
+  tmpCanvas.height = height / blockSize
+  const tmp = tmpCanvas.getContext('2d')
+  tmp.drawImage(ctx.canvas, 0, 0, tmpCanvas.width, tmpCanvas.height)
+  ctx.drawImage(tmpCanvas, 0, 0, width, height)
+}
+```
+
+**Chroma key (greenscreen) — CPU-side:**
+```js
+function chromaKey(frame, keyR, keyG, keyB, threshold = 80) {
+  const d = frame.data
+  for (let i = 0; i < d.length; i += 4) {
+    const dist = Math.sqrt(
+      (d[i] - keyR) ** 2 + (d[i+1] - keyG) ** 2 + (d[i+2] - keyB) ** 2
+    )
+    if (dist < threshold) d[i+3] = 0 // set alpha to 0 (transparent)
+  }
+}
+// Call after ctx.getImageData, before putImageData
+// Layer over background image using two stacked <canvas> elements
+```
+
+**GLSL chromakey (GPU — better performance):**
+```glsl
+uniform sampler2D uVideo;
+uniform vec3 uKeyColor;
+uniform float uThreshold;
+
+void main() {
+  vec4 texel = texture2D(uVideo, vUv);
+  float dist = length(texel.rgb - uKeyColor);
+  float alpha = step(uThreshold, dist);
+  gl_FragColor = vec4(texel.rgb, alpha);
+}
+```
+
+**Speech-to-visible-text (Web Speech API):**
+```js
+const recognition = new webkitSpeechRecognition()
+recognition.continuous = true
+recognition.interimResults = true
+recognition.onresult = (e) => {
+  const transcript = [...e.results].map(r => r[0].transcript).join(' ')
+  overlayEl.textContent = transcript
+  // animate in with character split + scramble for a live-decode effect
+}
+recognition.start()
+```
 
 ---
 
