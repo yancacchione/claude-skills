@@ -73,6 +73,40 @@ These are the principles that separate *working* animations from *great* ones. A
 
 6. **60fps or don't animate.** A stuttering animation is worse than no animation. If you can't hit 60fps, remove it.
 
+7. **Respect `prefers-reduced-motion`.** Always. No exceptions for "it's just a subtle fade." Wrap all non-essential motion. Users who opt out have a reason — vestibular disorders, seizure risk, focus needs.
+
+```css
+/* Global safety net — still include per-component overrides */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+```
+
+Framer Motion — `useReducedMotion()` hook returns `true` when the OS preference is set:
+```tsx
+import { useReducedMotion } from 'framer-motion'
+
+const prefersReduced = useReducedMotion()
+// Swap out the full animation variant for a no-op when true
+const variants = prefersReduced
+  ? { initial: {}, animate: {}, exit: {} }
+  : { initial: { opacity: 0, y: 12 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0 } }
+```
+
+Reanimated 3:
+```tsx
+import { useReducedMotion } from 'react-native-reanimated'
+
+const shouldReduce = useReducedMotion()
+// Skip spring; snap directly to target value
+scale.value = shouldReduce ? targetValue : withSpring(targetValue, { damping: 15 })
+```
+
 ### Origin-Aware Animations
 
 Elements should animate from where they came from. A dropdown triggered by a button should open *from that button*, not from the center of the screen. A modal that slides up should feel anchored to its trigger. Use `transform-origin` to control this.
@@ -308,6 +342,211 @@ void main() {
 
 ---
 
+## Scroll-Snap Animation Coordination
+
+Activate when the user describes full-viewport, one-section-per-screen layouts — quote viewers, presentation slides, product showcases, photo galleries. Each snap point is a "scene" and animations should feel cinematic: enter on snap, hold, exit on next snap.
+
+### The pattern: Intersection Observer + scroll-snap
+
+CSS handles snap; JS drives per-scene animation state via `IntersectionObserver`:
+
+```css
+.scroll-container {
+  height: 100dvh;
+  overflow-y: scroll;
+  scroll-snap-type: y mandatory;
+}
+.scene {
+  height: 100dvh;
+  scroll-snap-align: start;
+}
+```
+
+```js
+const observer = new IntersectionObserver(
+  (entries) => {
+    entries.forEach((entry) => {
+      entry.target.dataset.active = entry.isIntersecting ? 'true' : 'false'
+      // trigger enter/exit CSS class or imperative animation
+      if (entry.isIntersecting) entry.target.classList.add('in-view')
+      else entry.target.classList.remove('in-view')
+    })
+  },
+  { threshold: 0.8 } // 80% visible = "snapped"
+)
+document.querySelectorAll('.scene').forEach((s) => observer.observe(s))
+```
+
+```css
+/* Scene content animates in when snapped */
+.scene .content { opacity: 0; transform: translateY(16px); transition: opacity 400ms ease-out, transform 400ms ease-out; }
+.scene.in-view .content { opacity: 1; transform: translateY(0); }
+```
+
+### React pattern (Framer Motion + scroll-snap)
+
+```tsx
+import { motion, useInView } from 'framer-motion'
+import { useRef } from 'react'
+
+function Scene({ children }: { children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const inView = useInView(ref, { amount: 0.8 }) // fires at 80% visibility
+
+  return (
+    <div ref={ref} className="h-dvh snap-start flex items-center justify-center">
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={inView ? { opacity: 1, y: 0 } : { opacity: 0, y: 16 }}
+        transition={{ duration: 0.4, ease: 'easeOut' }}
+      >
+        {children}
+      </motion.div>
+    </div>
+  )
+}
+```
+
+### Staggered content inside a snap scene
+
+When the snapped section has multiple elements (title, subtitle, CTA), stagger them:
+
+```tsx
+const container = {
+  hidden: {},
+  visible: { transition: { staggerChildren: 0.08, delayChildren: 0.1 } },
+}
+const item = {
+  hidden: { opacity: 0, y: 12 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: 'easeOut' } },
+}
+
+<motion.div variants={container} initial="hidden" animate={inView ? 'visible' : 'hidden'}>
+  <motion.h2 variants={item}>Quote text</motion.h2>
+  <motion.p variants={item}>— Author, Book</motion.p>
+</motion.div>
+```
+
+### Key rules for scroll-snap animation
+
+- **Don't re-animate on snap-back** — detect direction if needed; or only animate `in-view` state, let exit be instant
+- **`scroll-snap-stop: always`** on critical content prevents fast-scroll skip
+- **`height: 100dvh`** not `100vh` — accounts for mobile browser chrome (Safari bottom bar)
+- **Avoid layout animation inside snap scenes** — `motion.div layout` causes height recalculation which fights snap
+- **Test on mobile** — scroll-snap inertia on iOS differs from desktop; `IntersectionObserver` timing can be off by one frame on fast flicks
+
+---
+
+## View Transitions API
+
+Activate when: page-to-page navigation in Next.js / Astro / vanilla MPA, shared-element transitions between routes, seamless hero image or card → detail view transitions.
+
+The View Transitions API is natively supported in all modern browsers (Chrome 111+, Safari 18+, Firefox 130+). No library required.
+
+### Vanilla — wrapping a route change
+
+```js
+// Wrap any DOM mutation in a transition
+async function navigate(url) {
+  if (!document.startViewTransition) {
+    // fallback: navigate without transition
+    window.location.href = url
+    return
+  }
+  const transition = document.startViewTransition(async () => {
+    // update the DOM here — fetch new content, swap innerHTML, etc.
+    const html = await fetch(url).then(r => r.text())
+    document.body.innerHTML = parseHTML(html).body.innerHTML
+    history.pushState({}, '', url)
+  })
+  await transition.finished
+}
+```
+
+```css
+/* Default cross-fade — override per element */
+::view-transition-old(root) { animation: 200ms ease-out both fade-out; }
+::view-transition-new(root) { animation: 300ms ease-out both fade-in; }
+
+@keyframes fade-out { to { opacity: 0 } }
+@keyframes fade-in  { from { opacity: 0 } }
+```
+
+### Shared element transition (card → detail)
+
+Name the element in both pages with `view-transition-name`. The browser morphs between them automatically.
+
+```css
+/* On the list page — give the card a unique name */
+.card[data-id="42"] { view-transition-name: card-42; }
+
+/* On the detail page — same name on the hero */
+.hero { view-transition-name: card-42; }
+```
+
+```css
+/* Control the morphing animation */
+::view-transition-group(card-42) {
+  animation-duration: 400ms;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+```
+
+Dynamic name assignment via JS (for lists where name is data-driven):
+```js
+el.style.viewTransitionName = `card-${id}` // set before transition starts
+// clear after transition to avoid name collisions
+transition.finished.then(() => { el.style.viewTransitionName = '' })
+```
+
+### Next.js 15 App Router
+
+Next.js 15 doesn't enable View Transitions natively, but you can wrap `router.push()`:
+
+```tsx
+'use client'
+import { useRouter } from 'next/navigation'
+
+export function useViewTransitionRouter() {
+  const router = useRouter()
+  
+  const push = (href: string) => {
+    if (!document.startViewTransition) {
+      router.push(href)
+      return
+    }
+    document.startViewTransition(() => {
+      router.push(href)
+    })
+  }
+  
+  return { push }
+}
+```
+
+Usage: `const { push } = useViewTransitionRouter()` → `<button onClick={() => push('/quote/42')}>`.
+
+### When to prefer View Transitions over Framer Motion
+
+| Situation | Reach for |
+|-----------|----------|
+| MPA / hard navigation, shared element morph | View Transitions API |
+| SPA with complex state-driven animation | Framer Motion `layoutId` |
+| Mixed SPA + server components (Next.js 15) | View Transitions wrapper around `router.push` |
+| Animating within the same route | Framer Motion |
+
+### `prefers-reduced-motion` with View Transitions
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root), ::view-transition-new(root) {
+    animation: none;
+  }
+}
+```
+
+---
+
 ## Audio-Reactive Animation
 
 Activate when: "audio reactive", "sound visualizer", "beat-driven", "amplitude", "frequency", or any animation that responds to microphone or audio playback.
@@ -474,6 +713,7 @@ recognition.start()
 - [ ] Reanimated worklets run on the UI thread (no `.value` access in render — only in `useAnimatedStyle`)
 - [ ] GLSL uniforms updated via `useFrame` ref, not React state
 - [ ] Lottie/Rive assets are compressed and not blocking the main thread
+- [ ] `prefers-reduced-motion` respected — non-essential animations disabled or instant for users who've opted out
 
 ---
 
