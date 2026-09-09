@@ -186,6 +186,51 @@ Read the context (imports, file extension, framework, existing code) and pick th
 
 ---
 
+## Design-to-Code: Paper.design / Figma Motion Tokens
+
+When Yan shares a Paper.design or Figma spec, extract these motion properties before writing code:
+
+| Token | Where to find it | Maps to |
+|-------|-----------------|---------|
+| Duration | Prototype tab, transition duration | `duration` in ms |
+| Easing | "Smart animate" / custom easing | cubic-bezier string or spring config |
+| Delay | Per-layer delay in prototype | `withDelay(ms, ...)` or CSS `animation-delay` |
+| Spring | If spring is specified: tension + friction or damping ratio | Reanimated `{ stiffness, damping }` |
+| Move by | Translate delta on enter/exit | `translateY` / `translateX` initial value |
+
+**Figma → Reanimated translation:**
+
+| Figma spring | Reanimated equivalent |
+|-------------|----------------------|
+| Tension 300, Friction 30 | `{ stiffness: 300, damping: 30 }` |
+| Damping ratio 0.7, Duration 400ms | `{ damping: 0.7 * 2 * Math.sqrt(stiffness), stiffness }` — or approximate with `{ damping: 18, stiffness: 250 }` |
+| "Gentle" preset | `{ damping: 20, stiffness: 200 }` |
+| "Bouncy" preset | `{ damping: 8, stiffness: 180 }` |
+| "Quick" preset | `{ damping: 25, stiffness: 400 }` |
+
+**JetBrains Mono variable font** — Yan's font of choice; animate weight axis for kinetic type:
+
+```css
+/* Pull in the variable font if hosted */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('JetBrainsMono[wght].woff2') format('woff2-variations');
+  font-weight: 100 800;
+}
+
+/* Animate weight on hover for terminal-aesthetic headers */
+.terminal-heading {
+  font-family: 'JetBrains Mono', monospace;
+  font-variation-settings: 'wght' 400;
+  transition: font-variation-settings 200ms ease-out;
+}
+.terminal-heading:hover {
+  font-variation-settings: 'wght' 700;
+}
+```
+
+---
+
 ## Library Quick-Reference
 
 ### CSS (no dependencies — always consider first)
@@ -271,7 +316,9 @@ gsap.from(chars, { opacity: 0, y: '100%', stagger: 0.03, ease: 'power3.out' })
 
 ```tsx
 import Animated, { useSharedValue, useAnimatedStyle,
-  withSpring, withTiming, FadeIn, FadeOut } from 'react-native-reanimated'
+  withSpring, withTiming, withSequence, withDelay, withRepeat,
+  FadeIn, FadeOut, useAnimatedScrollHandler, runOnJS,
+  LinearTransition, CurvedTransition } from 'react-native-reanimated'
 import { Gesture, GestureDetector } from 'react-native-gesture-handler'
 
 // Shared value → animated style
@@ -281,6 +328,39 @@ const onPress = () => { scale.value = withSpring(0.95, { damping: 15 }) }
 
 // Layout entry/exit
 <Animated.View entering={FadeIn.duration(300)} exiting={FadeOut.duration(200)}>
+
+// Sequence: animate through multiple values in order
+scale.value = withSequence(
+  withTiming(0.94, { duration: 80 }),   // press down
+  withSpring(1, { damping: 12 })        // spring back
+)
+
+// Delay: wait before starting
+opacity.value = withDelay(200, withTiming(1, { duration: 300 }))
+
+// Repeat: loop (positive count, or -1 for infinite)
+rotation.value = withRepeat(withTiming(2 * Math.PI, { duration: 1000 }), -1)
+
+// runOnJS: call a JS function from a worklet (e.g. trigger navigation, setState)
+const handleSnapEnd = (index: number) => setActiveIndex(index)
+const pan = Gesture.Pan().onEnd(() => {
+  'worklet'
+  runOnJS(handleSnapEnd)(computedIndex)
+})
+
+// Scroll handler — track scroll position on the UI thread
+const scrollY = useSharedValue(0)
+const scrollHandler = useAnimatedScrollHandler({ onScroll: (e) => {
+  scrollY.value = e.contentOffset.y
+}})
+const headerStyle = useAnimatedStyle(() => ({
+  opacity: 1 - scrollY.value / 100,
+  transform: [{ translateY: -scrollY.value * 0.3 }],
+}))
+// <Animated.ScrollView onScroll={scrollHandler} scrollEventThrottle={16}>
+
+// Layout animation (list reorder, add/remove items)
+<Animated.View layout={LinearTransition.springify().damping(20)}>
 
 // Gesture-driven (RNGH v2 — useAnimatedGestureHandler is deprecated)
 const translateX = useSharedValue(0)
@@ -297,6 +377,40 @@ const pan = Gesture.Pan()
 const composed = Gesture.Simultaneous(Gesture.Pinch(), pan)
 ```
 
+**Spring presets for common RN contexts:**
+
+| Context | `damping` | `stiffness` | Feel |
+|---------|-----------|-------------|------|
+| Button tap feedback | 15 | 400 | Snappy, responsive |
+| Drawer / bottom sheet | 20 | 200 | Smooth, physical |
+| Card flip / expand | 18 | 300 | Confident, not bouncy |
+| Playful / game UI | 8 | 180 | Bouncy, fun |
+| Modal slide-up | 25 | 250 | Purposeful, settled |
+
+**Expo Router screen transitions:**
+
+```tsx
+// app/_layout.tsx — custom stack animation
+import { Stack } from 'expo-router'
+
+<Stack screenOptions={{
+  animation: 'slide_from_right',   // default iOS
+  // 'slide_from_bottom' for modals
+  // 'fade' for tab-like switches
+  // 'none' to disable (then drive with Reanimated manually)
+  gestureEnabled: true,
+  gestureDirection: 'horizontal',
+}} />
+
+// Shared element transition (Expo Router v3+ with react-native-reanimated)
+// Tag both elements with the same sharedTransitionTag
+// Source screen:
+<Animated.Image source={item.img} sharedTransitionTag={`image-${item.id}`} />
+// Destination screen:
+<Animated.Image source={item.img} sharedTransitionTag={`image-${item.id}`} />
+// No extra config needed — Reanimated handles the morph automatically
+```
+
 ### Moti (Expo — simpler Reanimated 3 wrapper)
 
 ```tsx
@@ -305,6 +419,56 @@ import { MotiView, MotiText } from 'moti'
 <MotiView from={{ opacity: 0, translateY: 10 }} animate={{ opacity: 1, translateY: 0 }}
   transition={{ type: 'timing', duration: 300 }} />
 ```
+
+### Supabase Realtime + Animation
+
+When data arrives from a Supabase realtime subscription, animate the new item in rather than letting it pop. Pattern for React Native:
+
+```tsx
+import { useEffect } from 'react'
+import { useSharedValue, withSpring, withDelay, useAnimatedStyle } from 'react-native-reanimated'
+import { supabase } from '@/lib/supabase'
+
+// Track a list and animate new arrivals
+function useLiveItems<T extends { id: string }>(table: string) {
+  const [items, setItems] = useState<T[]>([])
+  const [newId, setNewId] = useState<string | null>(null)
+
+  useEffect(() => {
+    const channel = supabase.channel('realtime:' + table)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table },
+        (payload) => {
+          setItems(prev => [payload.new as T, ...prev])
+          setNewId((payload.new as T).id)
+        })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [table])
+
+  return { items, newId }
+}
+
+// Per-item animated row — fades + slides in only for the newest
+function AnimatedRow({ id, isNew }: { id: string; isNew: boolean }) {
+  const opacity = useSharedValue(isNew ? 0 : 1)
+  const translateY = useSharedValue(isNew ? -12 : 0)
+  
+  useEffect(() => {
+    if (isNew) {
+      opacity.value = withDelay(50, withSpring(1))
+      translateY.value = withDelay(50, withSpring(0, { damping: 18 }))
+    }
+  }, [isNew])
+
+  const style = useAnimatedStyle(() => ({
+    opacity: opacity.value,
+    transform: [{ translateY: translateY.value }],
+  }))
+  return <Animated.View style={style}>{/* row content */}</Animated.View>
+}
+```
+
+Key rule: **only animate the new item** — re-animating the whole list on each subscription event is jarring and looks broken.
 
 ### WebGL / GLSL (r3f or raw canvas)
 
