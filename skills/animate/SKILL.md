@@ -387,6 +387,67 @@ const composed = Gesture.Simultaneous(Gesture.Pinch(), pan)
 | Playful / game UI | 8 | 180 | Bouncy, fun |
 | Modal slide-up | 25 | 250 | Purposeful, settled |
 
+**`interpolate` — map a shared value to an output range (essential for scroll-driven UIs):**
+
+```tsx
+import { interpolate, Extrapolation } from 'react-native-reanimated'
+
+// Header fades + slides as user scrolls
+const scrollY = useSharedValue(0)
+const headerStyle = useAnimatedStyle(() => ({
+  opacity: interpolate(scrollY.value, [0, 80], [1, 0], Extrapolation.CLAMP),
+  transform: [{ translateY: interpolate(scrollY.value, [0, 80], [0, -20], Extrapolation.CLAMP) }],
+}))
+// Extrapolation.CLAMP: stays at boundary values outside range — almost always correct
+// Extrapolation.EXTEND: keeps extrapolating beyond range (can run to ±∞ — avoid)
+// Multi-stop (like a CSS @keyframe): interpolate(t, [0, 0.5, 1], [0, 1, 0], Extrapolation.CLAMP)
+
+// Tab bar scale on scroll (grows when scrolling up, shrinks when scrolling down)
+const tabStyle = useAnimatedStyle(() => ({
+  transform: [{ scaleY: interpolate(scrollY.value, [-20, 0, 80], [1.05, 1, 0.9], Extrapolation.CLAMP) }],
+}))
+```
+
+**`useAnimatedReaction` — worklet side-effect when a shared value crosses a threshold:**
+
+```tsx
+import { useAnimatedReaction, runOnJS } from 'react-native-reanimated'
+
+useAnimatedReaction(
+  () => scrollY.value,                    // selector — runs on UI thread, must be a worklet
+  (current, previous) => {
+    'worklet'
+    if (current > 100 && (previous ?? 0) <= 100) {
+      runOnJS(setHeaderCollapsed)(true)   // bridge to JS — all JS calls need runOnJS
+    }
+    if (current <= 100 && (previous ?? 0) > 100) {
+      runOnJS(setHeaderCollapsed)(false)
+    }
+  }
+)
+// Use for: threshold triggers, haptics on snap, analytics events, setState from scroll
+// Don't use for derived styles — that's useAnimatedStyle
+```
+
+**Haptics coordination — pair physical feedback with spring animation completion:**
+
+```tsx
+import * as Haptics from 'expo-haptics'
+
+// Fire haptic exactly when spring settles (third arg to withSpring is a completion callback)
+const snapToIndex = (index: number) => {
+  translateX.value = withSpring(snapPoints[index], { damping: 20 }, (finished) => {
+    'worklet'
+    if (finished) runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Medium)
+  })
+}
+// Feedback levels:
+// Light  → hover, focus, soft arrival
+// Medium → tap, select, card snap, list reorder
+// Heavy  → drag release, confirm, destructive action
+// Notification.Success / .Warning / .Error → system-level outcomes
+```
+
 **Expo Router screen transitions:**
 
 ```tsx
@@ -503,6 +564,55 @@ void main() {
 | Number count-up | GSAP `gsap.to(obj, { val })` | ease-out, duration matched to magnitude |
 | Text character reveal | GSAP SplitText or manual split | stagger 0.02–0.04s, power3.out |
 | Ink/grain texture | GLSL fragment shader | `uTime`-driven noise, low alpha overlay |
+| Loading progress (determinate) | CSS `scaleX` or Reanimated | `withTiming(pct, { duration: 300, easing: Easing.out(Easing.quad) })` |
+| Loading progress (indeterminate) | CSS `@keyframes` | sweeping gradient, 1.2s ease-in-out infinite |
+| Glow / aura pulse | CSS animation | `box-shadow` pulse on `@keyframes`, 2–4s ease-in-out infinite |
+
+**Loading progress bar patterns:**
+
+```css
+/* Indeterminate — no known completion time */
+@keyframes sweep {
+  0%   { transform: translateX(-100%) scaleX(0.4); }
+  50%  { transform: translateX(0%)    scaleX(0.8); }
+  100% { transform: translateX(100%)  scaleX(0.4); }
+}
+.progress-track { overflow: hidden; height: 3px; background: rgba(255,255,255,0.12); }
+.progress-bar   { height: 100%; background: currentColor;
+                  animation: sweep 1.2s ease-in-out infinite; }
+```
+
+```tsx
+// Determinate (React) — Framer Motion width
+import { motion } from 'framer-motion'
+<div className="overflow-hidden h-[3px] bg-white/10 rounded-full">
+  <motion.div className="h-full bg-white rounded-full"
+    initial={{ width: '0%' }}
+    animate={{ width: `${progress}%` }}
+    transition={{ duration: 0.3, ease: [0.25, 1, 0.5, 1] }} />
+</div>
+
+// Determinate (React Native / Reanimated)
+import { Easing } from 'react-native-reanimated'
+const width = useSharedValue(0)
+const setProgress = (pct: number) => {
+  width.value = withTiming(pct, { duration: 300, easing: Easing.out(Easing.quad) })
+}
+const barStyle = useAnimatedStyle(() => ({ width: `${width.value}%` as any }))
+```
+
+**Glow / aura pulse (CSS — phosphor aesthetic):**
+
+```css
+@keyframes aura {
+  0%, 100% { box-shadow: 0 0 12px 4px var(--glow-color, rgba(120,220,180,0.4)); }
+  50%       { box-shadow: 0 0 28px 10px var(--glow-color, rgba(120,220,180,0.7)); }
+}
+.glowing { animation: aura 3s ease-in-out infinite; }
+
+/* Dynamic color per element — set --glow-color via JS */
+el.style.setProperty('--glow-color', `rgba(${r},${g},${b},0.5)`)
+```
 
 ---
 
