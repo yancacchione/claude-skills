@@ -546,6 +546,154 @@ void main() {
 }
 ```
 
+#### Feedback Loop (Touch Designer style) — trails, echo, displacement
+
+TD's signature aesthetic comes from **ping-pong render targets**: each frame reads the previous frame's output as a texture input, feeding it back with slight decay or distortion. This creates trails, smear/echo effects, and organic displacement.
+
+**Three.js / r3f — ping-pong setup:**
+
+```js
+import * as THREE from 'three'
+
+// Two render targets — swap each frame
+const rtA = new THREE.WebGLRenderTarget(width, height)
+const rtB = new THREE.WebGLRenderTarget(width, height)
+let [read, write] = [rtA, rtB]
+
+// Feedback material reads the previous frame
+const feedbackMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uPrev:  { value: read.texture },   // last frame
+    uInput: { value: sourceTex },       // live webcam or scene
+    uDecay: { value: 0.96 },            // <1 fades; 1.0 = infinite trail
+    uDisplace: { value: 0.003 },        // UV shift per frame
+    uTime:  { value: 0 },
+  },
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+  `,
+  fragmentShader: /* glsl */`
+    uniform sampler2D uPrev;
+    uniform sampler2D uInput;
+    uniform float uDecay;
+    uniform float uDisplace;
+    uniform float uTime;
+    varying vec2 vUv;
+
+    vec2 noiseDisplace(vec2 uv, float t) {
+      float nx = fract(sin(dot(uv + t * 0.1, vec2(12.98, 78.23))) * 43758.5);
+      float ny = fract(sin(dot(uv + t * 0.1, vec2(93.98, 17.85))) * 43758.5);
+      return vec2(nx, ny) * 2.0 - 1.0;
+    }
+
+    void main() {
+      vec2 displaced = vUv + noiseDisplace(vUv, uTime) * uDisplace;
+      vec4 prev  = texture2D(uPrev, displaced) * uDecay;
+      vec4 live  = texture2D(uInput, vUv);
+      gl_FragColor = max(prev, live * 0.8); // live source bleeds through
+    }
+  `,
+})
+
+// In your render loop:
+function renderFeedback(renderer, scene, camera) {
+  feedbackMaterial.uniforms.uPrev.value = read.texture
+  feedbackMaterial.uniforms.uTime.value += 0.016
+
+  renderer.setRenderTarget(write)
+  renderer.render(feedbackScene, camera) // feedbackScene uses feedbackMaterial on a plane
+  renderer.setRenderTarget(null)
+
+  ;[read, write] = [write, read] // swap — next frame reads what we just wrote
+}
+```
+
+**Key controls:**
+
+| Uniform | Effect |
+|---------|--------|
+| `uDecay: 0.96` | Trails fade slowly — lower = faster fade |
+| `uDecay: 1.0` | Infinite accumulation — no fade |
+| `uDisplace: 0.003` | Subtle drift/smear — higher = more distortion |
+| `uDisplace: 0.0` | Clean echo with no spatial drift |
+| `max(prev, live)` | Additive brightness (glow buildup) |
+| `mix(prev, live, 0.15)` | Smooth blend — softer transition |
+
+**Reaction-diffusion (Gray-Scott)** — organic cellular/coral patterns, fully generative:
+
+```glsl
+// Ping-pong fragment — Gray-Scott reaction-diffusion
+uniform sampler2D uState; // previous RD state (r=chemical A, g=chemical B)
+uniform vec2 uResolution;
+
+// GS parameters — tune for different patterns:
+// Coral: f=0.0545, k=0.062 | Spots: f=0.025, k=0.06 | Worms: f=0.078, k=0.061
+uniform float uFeed;  // f: feed rate of A
+uniform float uKill;  // k: kill rate of B
+const float dA = 1.0, dB = 0.5;
+
+vec4 lap(vec2 uv) { // Laplacian (discrete diffusion)
+  vec2 px = 1.0 / uResolution;
+  return -4.0 * texture2D(uState, uv)
+    + texture2D(uState, uv + vec2(px.x, 0)) + texture2D(uState, uv - vec2(px.x, 0))
+    + texture2D(uState, uv + vec2(0, px.y)) + texture2D(uState, uv - vec2(0, px.y));
+}
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / uResolution;
+  vec4 state = texture2D(uState, uv);
+  float a = state.r, b = state.g;
+  float reaction = a * b * b;
+  float na = a + (dA * lap(uv).r - reaction + uFeed * (1.0 - a)) * 0.5;
+  float nb = b + (dB * lap(uv).g + reaction - (uKill + uFeed) * b) * 0.5;
+  gl_FragColor = vec4(clamp(na, 0.0, 1.0), clamp(nb, 0.0, 1.0), 0.0, 1.0);
+}
+```
+
+**UV displacement from noise** — distort any texture (webcam, image, scene) without a ping-pong:
+
+```glsl
+uniform sampler2D uTexture;
+uniform float uTime;
+uniform float uStrength; // 0.02–0.08 for subtle; 0.1+ for glitchy
+
+vec2 warpUV(vec2 uv, float t) {
+  float nx = sin(uv.y * 8.0 + t) * cos(uv.x * 3.0 + t * 0.7);
+  float ny = cos(uv.x * 6.0 + t * 1.3) * sin(uv.y * 4.0 - t * 0.5);
+  return uv + vec2(nx, ny) * uStrength;
+}
+
+void main() {
+  gl_FragColor = texture2D(uTexture, warpUV(vUv, uTime));
+}
+```
+
+**r3f / React integration pattern:**
+
+```tsx
+import { useFBO, useFrame } from '@react-three/fiber'
+import { useRef } from 'react'
+
+function FeedbackEffect() {
+  const targets = [useFBO(), useFBO()]
+  const idx = useRef(0)
+
+  useFrame(({ gl, scene, camera, clock }) => {
+    const read = targets[idx.current]
+    const write = targets[1 - idx.current]
+    feedbackMat.uniforms.uPrev.value = read.texture
+    feedbackMat.uniforms.uTime.value = clock.elapsedTime
+    gl.setRenderTarget(write)
+    gl.render(scene, camera)
+    gl.setRenderTarget(null)
+    idx.current = 1 - idx.current
+  })
+
+  return <mesh material={feedbackMat}><planeGeometry args={[2, 2]} /></mesh>
+}
+```
+
 ---
 
 ## Micro-Interaction Patterns
