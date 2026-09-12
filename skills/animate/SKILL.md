@@ -715,6 +715,8 @@ function FeedbackEffect() {
 | Loading progress (determinate) | CSS `scaleX` or Reanimated | `withTiming(pct, { duration: 300, easing: Easing.out(Easing.quad) })` |
 | Loading progress (indeterminate) | CSS `@keyframes` | sweeping gradient, 1.2s ease-in-out infinite |
 | Glow / aura pulse | CSS animation | `box-shadow` pulse on `@keyframes`, 2–4s ease-in-out infinite |
+| Shake / error feedback | CSS `@keyframes` or Reanimated `withSequence` | alternating `translateX`, ~500ms, 6 keyframes |
+| Hover reveal card | CSS `position:absolute` + `transform` | scale + opacity, set `transform-origin` to edge nearest trigger |
 
 **Loading progress bar patterns:**
 
@@ -760,6 +762,103 @@ const barStyle = useAnimatedStyle(() => ({ width: `${width.value}%` as any }))
 
 /* Dynamic color per element — set --glow-color via JS */
 el.style.setProperty('--glow-color', `rgba(${r},${g},${b},0.5)`)
+```
+
+**Shake / error feedback (CSS + Reanimated):**
+
+Use for: wrong password, magic 8-ball reveal, invalid input, game feedback. The rhythm — wide, narrow, wide, settle — reads as physical.
+
+```css
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  15%       { transform: translateX(-8px) rotate(-1deg); }
+  30%       { transform: translateX(8px)  rotate(1deg); }
+  45%       { transform: translateX(-6px); }
+  60%       { transform: translateX(6px); }
+  75%       { transform: translateX(-3px); }
+  90%       { transform: translateX(3px); }
+}
+.shake { animation: shake 0.5s ease-out; }
+/* Re-trigger: remove class, force reflow, add back */
+el.classList.remove('shake')
+void el.offsetWidth // reflow
+el.classList.add('shake')
+```
+
+```tsx
+// Reanimated 3 — shake a React Native element
+const shakeX = useSharedValue(0)
+const shakeStyle = useAnimatedStyle(() => ({ transform: [{ translateX: shakeX.value }] }))
+const shake = () => {
+  shakeX.value = withSequence(
+    withTiming(-10, { duration: 55 }),
+    withTiming( 10, { duration: 55 }),
+    withTiming( -8, { duration: 55 }),
+    withTiming(  8, { duration: 55 }),
+    withTiming( -4, { duration: 55 }),
+    withTiming(  0, { duration: 55 }),
+  )
+}
+// Also fire a haptic on the first frame: runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Error)
+```
+
+**Hover reveal card (scale up from trigger edge):**
+
+The pattern for a tooltip/info card that appears 25% larger than its base state — used when the card IS the revealed content, not a separate floating element (Motamo author card pattern). Key: `transform-origin` must point to the edge/corner closest to the trigger so the card grows "toward" the reader, not away from the trigger.
+
+```css
+.citation { position: relative; display: inline-block; cursor: default; }
+
+.reveal-card {
+  position: absolute;
+  bottom: calc(100% + 8px); /* or top / left / right based on available space */
+  left: 50%;
+  transform: translateX(-50%) scale(0.88);
+  transform-origin: bottom center; /* grows upward from the citation line */
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              opacity 180ms ease-out;
+  /* slight spring overshoot on scale makes it feel alive */
+}
+
+.citation:hover .reveal-card,
+.citation:focus-within .reveal-card {
+  transform: translateX(-50%) scale(1);
+  opacity: 1;
+  pointer-events: auto;
+}
+```
+
+```tsx
+// React — Framer Motion hover card (layoutId optional for shared element)
+import { motion, AnimatePresence } from 'framer-motion'
+import { useState } from 'react'
+
+function CitationCard({ author, bio, photo }: { author: string; bio: string; photo?: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <span className="relative inline-block" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+      <span className="cursor-default underline decoration-dotted">{author}</span>
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-56 rounded-lg bg-neutral-900 p-3 shadow-xl"
+            initial={{ opacity: 0, scale: 0.88, y: 4 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.92, y: 2 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 28 }}
+            style={{ transformOrigin: 'bottom center' }}
+          >
+            {photo && <img src={photo} alt={author} className="mb-2 h-12 w-12 rounded-full object-cover" />}
+            <p className="text-xs text-neutral-300">{bio}</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </span>
+  )
+}
+// Note: on mobile (touch), swap hover for tap-to-toggle — onMouseEnter/Leave won't fire
 ```
 
 ---
