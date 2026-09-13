@@ -256,6 +256,43 @@ When Yan shares a Paper.design or Figma spec, extract these motion properties be
 }
 ```
 
+### Next.js App Router — animation constraints
+
+Every Framer Motion, Reanimated, or motion-hook call requires a client component. In Next.js App Router:
+
+- Mark any file using `motion.*`, `AnimatePresence`, `useAnimate`, `useMotionValue` with `'use client'` at the top — the build will fail or silently break otherwise.
+- `AnimatePresence` for **page transitions** must live in a client component that wraps the route segment — put it in a dedicated `<LayoutClient>` component imported by your server `layout.tsx`:
+
+```tsx
+// app/layout-client.tsx
+'use client'
+import { AnimatePresence, motion } from 'framer-motion'
+import { usePathname } from 'next/navigation'
+
+export function LayoutClient({ children }: { children: React.ReactNode }) {
+  const key = usePathname()
+  return (
+    <AnimatePresence mode="wait">
+      <motion.div key={key} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+        {children}
+      </motion.div>
+    </AnimatePresence>
+  )
+}
+
+// app/layout.tsx (Server Component — fine to import from here)
+import { LayoutClient } from './layout-client'
+export default function RootLayout({ children }) {
+  return <html><body><LayoutClient>{children}</LayoutClient></body></html>
+}
+```
+
+- **Prefer View Transitions API** (native, no JS overhead) for cross-route morphs — see the View Transitions section below. Reserve Framer Motion `AnimatePresence` for within-route show/hide.
+- **`motion.div layout` + RSC**: if a component uses the `layout` prop and its parent is a Server Component, hydration mismatches can occur. Keep layout-animated trees entirely inside client components.
+
+---
+
 ### Framer Motion (React)
 
 ```tsx
@@ -717,6 +754,8 @@ function FeedbackEffect() {
 | Glow / aura pulse | CSS animation | `box-shadow` pulse on `@keyframes`, 2–4s ease-in-out infinite |
 | Shake / error feedback | CSS `@keyframes` or Reanimated `withSequence` | alternating `translateX`, ~500ms, 6 keyframes |
 | Hover reveal card | CSS `position:absolute` + `transform` | scale + opacity, set `transform-origin` to edge nearest trigger |
+| Simulated async progress | Framer Motion `useMotionValue` / Reanimated `withTiming` | asymptote to 95%, snap to 100% on complete |
+| Optimistic UI state | Framer Motion `AnimatePresence` + local state | animate instantly, rollback in catch |
 
 **Loading progress bar patterns:**
 
@@ -750,6 +789,142 @@ const setProgress = (pct: number) => {
 }
 const barStyle = useAnimatedStyle(() => ({ width: `${width.value}%` as any }))
 ```
+
+**Simulated async progress — for ops with no real progress signal (like an API call):**
+
+Drive toward 95% asymptotically while the call is running; snap to 100% on completion. Never stall at 100% — brief hold, then reset. This is the right pattern for Motamo's "publishing" flow, Supabase writes, and any server action that takes 2–8s with no incremental signal.
+
+```tsx
+// React (Framer Motion useMotionValue)
+'use client'
+import { useEffect } from 'react'
+import { motion, useMotionValue, animate } from 'framer-motion'
+
+function useSimulatedProgress(isRunning: boolean) {
+  const progress = useMotionValue(0)
+
+  useEffect(() => {
+    let controls: ReturnType<typeof animate> | null = null
+    if (isRunning) {
+      progress.set(0)
+      // Asymptotic: fast start, slows to near-stop before 95% (won't complete in ~8s)
+      controls = animate(progress, 0.95, { duration: 8, ease: [0.1, 0.4, 0.6, 0.9] })
+    } else if (progress.get() > 0) {
+      controls?.stop()
+      // Snap to 100%, hold 400ms, then clear
+      animate(progress, 1, { duration: 0.2 }).then(() => {
+        setTimeout(() => animate(progress, 0, { duration: 0 }), 400)
+      })
+    }
+    return () => controls?.stop()
+  }, [isRunning])
+
+  return progress
+}
+
+// Usage
+function PublishButton({ onPublish }: { onPublish: () => Promise<void> }) {
+  const [running, setRunning] = useState(false)
+  const progress = useSimulatedProgress(running)
+
+  const handleClick = async () => {
+    setRunning(true)
+    await onPublish()
+    setRunning(false) // triggers snap-to-100 + clear
+  }
+
+  return (
+    <button onClick={handleClick} disabled={running}>
+      <div className="overflow-hidden h-[3px] bg-white/10 rounded-full">
+        <motion.div className="h-full bg-white rounded-full origin-left"
+          style={{ scaleX: progress }} />
+      </div>
+      {running ? 'Publishing…' : 'Publish'}
+    </button>
+  )
+}
+```
+
+```tsx
+// React Native — Reanimated 3 version
+import { useSharedValue, withTiming, withSequence, withDelay, Easing } from 'react-native-reanimated'
+
+function useSimulatedProgress(isRunning: boolean) {
+  const progress = useSharedValue(0)
+
+  useEffect(() => {
+    if (isRunning) {
+      progress.value = 0
+      // Slow asymptote — won't reach 0.95 before ~8s
+      progress.value = withTiming(0.95, { duration: 8000, easing: Easing.out(Easing.cubic) })
+    } else if (progress.value > 0) {
+      progress.value = withSequence(
+        withTiming(1, { duration: 200 }),
+        withDelay(400, withTiming(0, { duration: 0 })),
+      )
+    }
+  }, [isRunning])
+
+  return progress
+}
+```
+
+Key rule: the asymptote target is **95%, not 100%** — never animate to 100% before the call actually completes. Seeing a bar stuck at 100% while still loading is more frustrating than one that slowly crawls toward 95%.
+
+---
+
+**Optimistic UI animation — animate success immediately, roll back on error:**
+
+For dashboard interactions (publish, approve, delete) where you want instant feel without waiting for the server:
+
+```tsx
+'use client'
+import { useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+
+function PublishableRow({ quote, onPublish }: { quote: Quote; onPublish: (id: string) => Promise<void> }) {
+  // Optimistic: immediately show published state
+  const [optimisticPublished, setOptimisticPublished] = useState(quote.published)
+  const [error, setError] = useState(false)
+
+  const handlePublish = async () => {
+    const prev = optimisticPublished
+    setOptimisticPublished(true) // immediate — animation fires now
+    setError(false)
+    try {
+      await onPublish(quote.id)
+    } catch {
+      setOptimisticPublished(prev) // rollback
+      setError(true)
+    }
+  }
+
+  return (
+    <motion.div
+      animate={{ opacity: optimisticPublished ? 1 : 0.6 }}
+      transition={{ duration: 0.2 }}
+    >
+      <AnimatePresence mode="wait">
+        {optimisticPublished ? (
+          <motion.span key="pub"
+            initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0 }} transition={{ duration: 0.15 }}
+          >PUBLISHED</motion.span>
+        ) : (
+          <motion.button key="draft" onClick={handlePublish}
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          >PUBLISH</motion.button>
+        )}
+      </AnimatePresence>
+      {error && <span className="text-red-500 text-xs">Failed — try again</span>}
+    </motion.div>
+  )
+}
+```
+
+Rollback rule: always store the previous state before the optimistic update — `const prev = currentState` — so you can restore it in the catch block. The error state triggers its own micro-animation (shake, color change, or inline message — not a toast).
+
+---
 
 **Glow / aura pulse (CSS — phosphor aesthetic):**
 
