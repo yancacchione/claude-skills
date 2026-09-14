@@ -35,6 +35,7 @@ Ask **at most one clarifying question**, and only if the trigger/event is genuin
 - Page transitions: **300–500ms** (route change, hero swap)
 - Ambient / continuous: **1000ms+** (breathing, looping, ambient)
 - Stagger between children: **20–60ms** offset — enough to be visible, not so much it feels slow
+- **Contemplative / reading contexts** (quote apps, journals, question curation): intentionally use **400–600ms** with `ease-in-out` or `cubic-bezier(0.4, 0, 0.2, 1)` — the slowness creates breathing room and signals "this is not a task app." Don't mistake it for a perf problem. Empty states in these contexts should breathe, not pop.
 
 ### Properties — only animate these
 
@@ -746,6 +747,7 @@ function FeedbackEffect() {
 | Page transition | Framer Motion / GSAP | fade + slight Y shift, 300ms |
 | Pull-to-refresh | Reanimated 3 | spring, clamp displacement |
 | Scroll reveal | Scroll-driven CSS or ScrollTrigger | threshold 20–30% from bottom |
+| Sticky header on scroll-past | IntersectionObserver + `AnimatePresence` / `interpolate` | appears when hero exits viewport; fade-in 200ms + `-8px` → `0` translateY |
 | Number count-up | GSAP `gsap.to(obj, { val })` | ease-out, duration matched to magnitude |
 | Text character reveal | GSAP SplitText or manual split | stagger 0.02–0.04s, power3.out |
 | Ink/grain texture | GLSL fragment shader | `uTime`-driven noise, low alpha overlay |
@@ -1130,6 +1132,144 @@ const item = {
 - **`height: 100dvh`** not `100vh` — accounts for mobile browser chrome (Safari bottom bar)
 - **Avoid layout animation inside snap scenes** — `motion.div layout` causes height recalculation which fights snap
 - **Test on mobile** — scroll-snap inertia on iOS differs from desktop; `IntersectionObserver` timing can be off by one frame on fast flicks
+
+---
+
+## Scroll-Past Sticky Header
+
+Activate when: a page has a hero element (book cover, profile image, product photo) at the top, and a condensed header should appear only after the user has scrolled past it. Common in book/quote pages, profile pages, product pages.
+
+### Web — IntersectionObserver + Framer Motion AnimatePresence
+
+```tsx
+'use client'
+import { useEffect, useRef, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
+
+function BookPage({ book, quotes }: { book: Book; quotes: Quote[] }) {
+  const heroRef = useRef<HTMLDivElement>(null)
+  const [pastHero, setPastHero] = useState(false)
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => setPastHero(!entry.isIntersecting),
+      { threshold: 0, rootMargin: '-64px 0px 0px 0px' } // adjust for any fixed nav above
+    )
+    if (heroRef.current) observer.observe(heroRef.current)
+    return () => observer.disconnect()
+  }, [])
+
+  return (
+    <>
+      {/* Sticky header — mounts when hero exits the viewport */}
+      <AnimatePresence>
+        {pastHero && (
+          <motion.header
+            className="fixed top-0 inset-x-0 z-50 bg-neutral-950/95 backdrop-blur-sm border-b border-white/8"
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
+          >
+            <div className="flex items-center h-14 px-4 gap-3">
+              <span className="text-sm font-medium truncate">{book.title}</span>
+            </div>
+          </motion.header>
+        )}
+      </AnimatePresence>
+
+      {/* Hero — observed for exit */}
+      <div ref={heroRef}>
+        {/* book cover, title, etc. */}
+      </div>
+
+      {quotes.map(q => <QuoteRow key={q.id} quote={q} />)}
+    </>
+  )
+}
+```
+
+Key: `!entry.isIntersecting` — header appears when the hero is NOT intersecting (scrolled off the top). `rootMargin: '-64px 0px 0px 0px'` accounts for any fixed nav above; match to your layout. Exit animation is subtler than entrance — `-4px` vs `-8px` — because abrupt disappearance reads as a glitch.
+
+### Combining sticky header with a single-quote horizontal scroll
+
+When the sticky header itself should show one quote at a time (e.g. MOTAMO book page), embed a horizontal scroll-snap inside it:
+
+```tsx
+// Inside the sticky header motion.header above:
+<div className="flex items-center gap-3 h-14 px-4">
+  <span className="text-xs text-white/40 shrink-0">{book.title}</span>
+  {/* Single-quote carousel — horizontal snap, no visible scrollbar */}
+  <div className="flex-1 overflow-x-auto snap-x snap-mandatory scroll-smooth no-scrollbar">
+    <div className="flex">
+      {quotes.map((q) => (
+        <div key={q.id} className="snap-start shrink-0 w-full px-2">
+          <p className="text-xs text-white/80 truncate">{q.text}</p>
+        </div>
+      ))}
+    </div>
+  </div>
+</div>
+```
+
+```css
+/* Hide scrollbar but keep scrollability */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+```
+
+Drive the scroll position programmatically from the main page's active snap index, or let the user swipe independently. For a programmatic link between the main scroll and the sticky header's quote, use `scrollIntoView` on the quote element:
+
+```tsx
+// When the user snaps to quote i on the main page, advance the header carousel
+useEffect(() => {
+  headerQuoteRefs.current[activeIndex]?.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' })
+}, [activeIndex])
+```
+
+### React Native — `useAnimatedScrollHandler` + `interpolate`
+
+```tsx
+import { useSharedValue, useAnimatedScrollHandler, useAnimatedStyle, interpolate, Extrapolation } from 'react-native-reanimated'
+import Animated from 'react-native-reanimated'
+
+const HERO_HEIGHT = 320 // px — height of book cover section
+
+function BookScreen({ book, quotes }: { book: Book; quotes: Quote[] }) {
+  const scrollY = useSharedValue(0)
+  const scrollHandler = useAnimatedScrollHandler({ onScroll: (e) => { scrollY.value = e.contentOffset.y } })
+
+  const stickyStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(scrollY.value, [HERO_HEIGHT - 60, HERO_HEIGHT], [0, 1], Extrapolation.CLAMP),
+    transform: [{ translateY: interpolate(scrollY.value, [HERO_HEIGHT - 60, HERO_HEIGHT], [-8, 0], Extrapolation.CLAMP) }],
+  }))
+
+  return (
+    <>
+      <Animated.View style={[styles.stickyHeader, stickyStyle]} pointerEvents="box-none">
+        <Text numberOfLines={1} style={styles.stickyTitle}>{book.title}</Text>
+      </Animated.View>
+
+      <Animated.ScrollView onScroll={scrollHandler} scrollEventThrottle={16}>
+        <View style={{ height: HERO_HEIGHT }}>{/* book cover */}</View>
+        {quotes.map(q => <QuoteRow key={q.id} quote={q} />)}
+      </Animated.ScrollView>
+    </>
+  )
+}
+
+const styles = StyleSheet.create({
+  stickyHeader: {
+    position: 'absolute', top: 0, left: 0, right: 0, zIndex: 50,
+    height: 56, paddingHorizontal: 16,
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: 'rgba(10, 10, 10, 0.95)',
+  },
+  stickyTitle: { fontSize: 14, fontWeight: '600', color: '#fff', flex: 1 },
+})
+```
+
+Interpolating over the last 60px of the hero (`HERO_HEIGHT - 60` → `HERO_HEIGHT`) ties the opacity + slide to scroll position — it feels physically attached to the hero leaving screen. Never use a hard blink (`pointerEvents` toggle only) — it reads as a flash.
 
 ---
 
