@@ -257,6 +257,55 @@ When Yan shares a Paper.design or Figma spec, extract these motion properties be
 }
 ```
 
+**`@starting-style` — animate elements entering from `display:none` without any JS:**
+
+Supported in Chrome 117+, Safari 17.5+, Firefox 129+. The correct way to animate dialogs, popovers, and conditionally-rendered elements without Framer Motion's AnimatePresence.
+
+```css
+/* Animating a <dialog> or popover that goes display:none → display:block */
+dialog {
+  opacity: 0;
+  transform: scale(0.95) translateY(4px);
+}
+
+dialog[open] {
+  opacity: 1;
+  transform: scale(1) translateY(0);
+  /* transition-behavior: allow-discrete lets the transition fire even though
+     'display' is a discrete property — without it, the enter animation won't play */
+  transition: opacity 200ms ease-out, transform 200ms ease-out,
+              display 200ms allow-discrete,
+              overlay 200ms allow-discrete; /* overlay = backing-layer participation */
+}
+
+/* @starting-style sets where the enter transition starts from (before [open] applies) */
+@starting-style {
+  dialog[open] {
+    opacity: 0;
+    transform: scale(0.95) translateY(4px);
+  }
+}
+```
+
+```css
+/* Same pattern for a CSS popover (Popover API) */
+[popover] { opacity: 0; transform: translateY(-4px); }
+[popover]:popover-open {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 150ms ease-out, transform 150ms ease-out,
+              display 150ms allow-discrete, overlay 150ms allow-discrete;
+}
+@starting-style {
+  [popover]:popover-open { opacity: 0; transform: translateY(-4px); }
+}
+```
+
+When to use `@starting-style` vs `AnimatePresence`:
+- `@starting-style` = CSS-only enter from `display:none`, no JS, works on native `<dialog>` and `popover` API
+- `AnimatePresence` = React tree mounts/unmounts, richer sequencing, cross-platform
+- If you already have a `<dialog>` or `popover`, reach for `@starting-style` first — it's zero dependency
+
 ### Next.js App Router — animation constraints
 
 Every Framer Motion, Reanimated, or motion-hook call requires a client component. In Next.js App Router:
@@ -413,6 +462,48 @@ const pan = Gesture.Pan()
 
 // Simultaneous gestures (pinch + pan)
 const composed = Gesture.Simultaneous(Gesture.Pinch(), pan)
+
+// withDecay — physics-based fling after a pan gesture (swipe-to-dismiss, momentum scroll)
+import { withDecay } from 'react-native-reanimated'
+
+const translateX = useSharedValue(0)
+const fling = Gesture.Pan()
+  .onUpdate((e) => { translateX.value = e.translationX })
+  .onEnd((e) => {
+    translateX.value = withDecay({
+      velocity: e.velocityX,        // hand off exact finger velocity
+      rubberBandEffect: true,       // elastic bounce at clamp edges
+      clamp: [-SCREEN_WIDTH * 0.5, SCREEN_WIDTH * 0.5], // hard limits
+    })
+  })
+// withDecay reads like the object is still moving when your finger lifts — no spring bounce.
+// Use it for: swipe-to-dismiss drawers, momentum carousel, physics-based scroll overscroll.
+// For snapping to a grid after decay, combine with onEnd checking final position + withSpring.
+```
+
+**`useAnimatedKeyboard` — keyboard-aware layouts without KeyboardAvoidingView:**
+
+```tsx
+import { useAnimatedKeyboard, useAnimatedStyle, KeyboardState } from 'react-native-reanimated'
+
+function CommentInput() {
+  const keyboard = useAnimatedKeyboard()
+
+  // Translate the input up by exactly the keyboard height as it animates in
+  const containerStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: -keyboard.height.value }],
+  }))
+
+  return (
+    <Animated.View style={[styles.inputBar, containerStyle]}>
+      <TextInput placeholder="Add a reflection…" />
+    </Animated.View>
+  )
+}
+// keyboard.state.value: KeyboardState.OPEN | CLOSING | OPENING | CLOSED
+// keyboard.height.value: animated height — already interpolated, just use it
+// Works on both iOS and Android; no LayoutAnimation or KeyboardAvoidingView needed.
+// Note: requires Reanimated 3.1+ and enableExperimentalWebImplementation for web.
 ```
 
 **Spring presets for common RN contexts:**
@@ -755,6 +846,7 @@ function FeedbackEffect() {
 | Loading progress (indeterminate) | CSS `@keyframes` | sweeping gradient, 1.2s ease-in-out infinite |
 | Glow / aura pulse | CSS animation | `box-shadow` pulse on `@keyframes`, 2–4s ease-in-out infinite |
 | Shake / error feedback | CSS `@keyframes` or Reanimated `withSequence` | alternating `translateX`, ~500ms, 6 keyframes |
+| Tab / segment switch | Framer Motion `layoutId` pill or Reanimated `withSpring` on indicator | pill slides under active tab; 200ms spring, not a hard jump |
 | Hover reveal card | CSS `position:absolute` + `transform` | scale + opacity, set `transform-origin` to edge nearest trigger |
 | Simulated async progress | Framer Motion `useMotionValue` / Reanimated `withTiming` | asymptote to 95%, snap to 100% on complete |
 | Optimistic UI state | Framer Motion `AnimatePresence` + local state | animate instantly, rollback in catch |
@@ -978,6 +1070,58 @@ const shake = () => {
 }
 // Also fire a haptic on the first frame: runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Error)
 ```
+
+**Tab / segment switch — animated indicator that slides under the active tab:**
+
+```tsx
+// React — Framer Motion layoutId pill (web)
+import { motion } from 'framer-motion'
+
+const tabs = ['Quotes', 'Books']
+const [active, setActive] = useState('Quotes')
+
+<div className="flex gap-1 relative">
+  {tabs.map((tab) => (
+    <button key={tab} onClick={() => setActive(tab)}
+      className="relative px-4 py-1.5 text-sm font-medium text-white/60 transition-colors hover:text-white"
+      style={{ color: active === tab ? '#fff' : undefined }}
+    >
+      {active === tab && (
+        <motion.span
+          layoutId="tab-pill"  // same id across all tabs — Framer morphs the single element
+          className="absolute inset-0 rounded-full bg-white/10"
+          transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+        />
+      )}
+      <span className="relative z-10">{tab}</span>
+    </button>
+  ))}
+</div>
+```
+
+```tsx
+// React Native — Reanimated 3 underline indicator
+import { useSharedValue, useAnimatedStyle, withSpring } from 'react-native-reanimated'
+
+const TAB_WIDTH = 80
+const indicatorX = useSharedValue(0)
+
+const indicatorStyle = useAnimatedStyle(() => ({
+  transform: [{ translateX: indicatorX.value }],
+}))
+
+const handleTabPress = (index: number) => {
+  indicatorX.value = withSpring(index * TAB_WIDTH, { damping: 20, stiffness: 300 })
+  setActiveTab(index)
+}
+
+// JSX: a <Animated.View style={indicatorStyle}> positioned absolute below the tab row,
+// width = TAB_WIDTH, height = 2, backgroundColor = activeColor
+```
+
+Key: never toggle visibility of the indicator between tabs — let one indicator *slide* to the active position. A blinking-in indicator looks broken.
+
+---
 
 **Hover reveal card (scale up from trigger edge):**
 
