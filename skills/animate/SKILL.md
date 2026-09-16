@@ -306,6 +306,53 @@ When to use `@starting-style` vs `AnimatePresence`:
 - `AnimatePresence` = React tree mounts/unmounts, richer sequencing, cross-platform
 - If you already have a `<dialog>` or `popover`, reach for `@starting-style` first — it's zero dependency
 
+**`@property` — typed custom properties that CSS can actually interpolate:**
+
+Without `@property`, CSS transitions on `--custom-vars` snap instead of interpolate. With it, any property with a declared type becomes a first-class animatable value — enabling smooth hue shifts, glow pulses, and gradient morphs with zero JS.
+
+```css
+/* Declare types so the browser knows how to interpolate */
+@property --hue {
+  syntax: '<angle>';
+  initial-value: 160deg;
+  inherits: false;
+}
+@property --glow-alpha {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: false;
+}
+
+/* These custom properties now animate smoothly in transitions */
+.neon {
+  --hue: 160deg;
+  --glow-alpha: 0;
+  color: hsl(var(--hue) 80% 65%);
+  box-shadow: 0 0 20px hsla(var(--hue) 80% 65% / var(--glow-alpha));
+  transition: --hue 600ms ease-out, --glow-alpha 300ms ease-out;
+}
+.neon:hover {
+  --hue: 280deg;
+  --glow-alpha: 0.7;
+}
+
+/* Looping gradient animation using @property — no JS, GPU-composited */
+@property --gradient-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes rotate-gradient {
+  to { --gradient-angle: 360deg; }
+}
+.gradient-ring {
+  background: conic-gradient(from var(--gradient-angle), #0ff, #f0f, #ff0, #0ff);
+  animation: rotate-gradient 4s linear infinite;
+}
+```
+
+Support: Chrome 85+, Safari 16.4+, Firefox 128+. For the phosphor/neon aesthetic, this replaces opacity-only glow animations with true color-shift animations.
+
 ### Next.js App Router — animation constraints
 
 Every Framer Motion, Reanimated, or motion-hook call requires a client component. In Next.js App Router:
@@ -1682,6 +1729,86 @@ recognition.onresult = (e) => {
 }
 recognition.start()
 ```
+
+**Dominant color extraction from a video/canvas frame — for aura and palette effects:**
+
+Samples a grid of pixels, skips near-black and near-white (background/highlights), averages the rest. Fast enough to run every few frames without a worker.
+
+```js
+// Extract dominant color from a canvas context
+// Returns [r, g, b] (0–255 each)
+function extractDominantColor(ctx, width, height, sampleStep = 12) {
+  const { data } = ctx.getImageData(0, 0, width, height)
+  let r = 0, g = 0, b = 0, count = 0
+  for (let i = 0; i < data.length; i += 4 * sampleStep) {
+    const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3
+    // Skip near-black (background) and near-white (blown-out highlights)
+    if (brightness < 24 || brightness > 230) continue
+    r += data[i]; g += data[i + 1]; b += data[i + 2]
+    count++
+  }
+  if (count === 0) return [120, 220, 180] // fallback teal
+  return [Math.round(r / count), Math.round(g / count), Math.round(b / count)]
+}
+```
+
+**Aura pipeline — live video → dominant color → animated CSS glow:**
+
+Pairs the extraction above with the tick loop from the webcam setup. `lerp` smooths color transitions so the glow feels alive rather than flickering:
+
+```js
+let currentAura = [120, 220, 180]
+let targetAura  = [120, 220, 180]
+let frameCount  = 0
+
+function lerpColor([r1, g1, b1], [r2, g2, b2], t) {
+  return [
+    Math.round(r1 + (r2 - r1) * t),
+    Math.round(g1 + (g2 - g1) * t),
+    Math.round(b1 + (b2 - b1) * t),
+  ]
+}
+
+function auraTick(video, canvas, ctx, auraEl) {
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+
+  // Re-sample color every 20 frames (≈3× per second at 60fps) — cheaper than every frame
+  if (frameCount % 20 === 0) {
+    targetAura = extractDominantColor(ctx, canvas.width, canvas.height)
+  }
+  frameCount++
+
+  // Ease current color toward target — t=0.04 gives a ~25-frame settle
+  currentAura = lerpColor(currentAura, targetAura, 0.04)
+  const [r, g, b] = currentAura
+
+  // Push to the glow element — this is the same --glow-color var used in the aura pulse section
+  auraEl.style.setProperty('--glow-color', `rgba(${r},${g},${b},0.6)`)
+
+  requestAnimationFrame(() => auraTick(video, canvas, ctx, auraEl))
+}
+
+// Start it after getUserMedia resolves
+navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+  video.srcObject = stream
+  video.play().then(() => auraTick(video, canvas, ctx, auraEl))
+})
+```
+
+```css
+/* The glow element — reads the JS-driven --glow-color CSS variable */
+.aura-halo {
+  position: absolute;
+  inset: -40px;
+  border-radius: 50%;
+  filter: blur(40px);
+  background: var(--glow-color, rgba(120, 220, 180, 0.5));
+  transition: background 300ms ease-out; /* smooth even between rAF updates */
+  pointer-events: none;
+}
+```
+
+Key rule: **sample step ≥ 10** — sampling every pixel at 640×480 is 300K iterations per frame. A step of 12 reads ~2 200 pixels and takes < 2ms. Use `filter: blur()` on the glow element, not on the video — blurring the whole camera feed tanks performance.
 
 ---
 
