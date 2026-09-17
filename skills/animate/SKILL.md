@@ -605,6 +605,37 @@ useAnimatedReaction(
 // Don't use for derived styles — that's useAnimatedStyle
 ```
 
+**`useDerivedValue` — compute a derived animated value on the UI thread:**
+
+```tsx
+import { useDerivedValue } from 'react-native-reanimated'
+
+// Derive a value from shared values — runs on UI thread, returns a read-only shared value
+const rotation = useSharedValue(0)
+const radians = useDerivedValue(() => (rotation.value * Math.PI) / 180)
+
+// Use in useAnimatedStyle like any shared value
+const style = useAnimatedStyle(() => ({
+  transform: [{ rotate: `${radians.value}rad` }],
+}))
+
+// More practical: compute once, share across multiple components
+const scrollY = useSharedValue(0)
+const headerOpacity = useDerivedValue(() =>
+  Math.min(1, Math.max(0, scrollY.value / 80))
+)
+const headerScale = useDerivedValue(() =>
+  interpolate(scrollY.value, [0, 80], [1, 0.96], Extrapolation.CLAMP)
+)
+// Pass headerOpacity and headerScale to any child — no repeated interpolation logic
+```
+
+Rules:
+- `useDerivedValue` = compute a derived *animated value* (read on UI thread). Use when the same derived expression would appear in multiple `useAnimatedStyle` calls.
+- `useAnimatedStyle` = map animated values → style object. Can read `useDerivedValue` results directly.
+- `useAnimatedReaction` = side effects when a value crosses a threshold (haptics, `runOnJS`).
+- Never call `useDerivedValue` just to trigger a JS effect — that produces silent worklet errors.
+
 **Haptics coordination — pair physical feedback with spring animation completion:**
 
 ```tsx
@@ -845,6 +876,72 @@ void main() {
 }
 ```
 
+**GLSL glitch effects — chromatic aberration, RGB split, scanlines:**
+
+These are the primary tools for a Touch Designer / photobooth / dystopian aesthetic. GPU-side, zero layout cost.
+
+```glsl
+// Chromatic aberration (RGB split) — offset R, G, B channels by different UV amounts
+uniform sampler2D uTexture;
+uniform float uStrength;  // 0.005–0.02 for subtle; 0.03+ for glitchy
+uniform float uTime;
+varying vec2 vUv;
+
+void main() {
+  // Directional split — subtle circular aberration
+  vec2 dir = vUv - 0.5;
+  float dist = length(dir);
+  vec2 offset = normalize(dir) * uStrength * dist;
+
+  float r = texture2D(uTexture, vUv + offset).r;
+  float g = texture2D(uTexture, vUv).g;
+  float b = texture2D(uTexture, vUv - offset).b;
+  gl_FragColor = vec4(r, g, b, 1.0);
+}
+```
+
+```glsl
+// Digital glitch — horizontal slice displacement driven by noise + time
+uniform sampler2D uTexture;
+uniform float uTime;
+uniform float uIntensity; // 0.0 = off, 1.0 = heavy glitch
+varying vec2 vUv;
+
+float rand(float n) { return fract(sin(n) * 43758.5453); }
+
+void main() {
+  float sliceY = floor(vUv.y * 40.0) / 40.0;          // quantize into horizontal bands
+  float noise  = rand(sliceY + floor(uTime * 12.0));   // changes ~12× per second
+  float active = step(0.92, noise) * uIntensity;       // only ~8% of bands glitch at once
+  float shift  = (rand(sliceY * 7.3 + uTime) * 2.0 - 1.0) * 0.04 * active;
+
+  vec2 uv = vUv + vec2(shift, 0.0);
+  gl_FragColor = texture2D(uTexture, uv);
+}
+```
+
+```glsl
+// Scanlines overlay — dark horizontal bands, TV/CRT look
+uniform float uResolutionY;  // canvas height in px
+varying vec2 vUv;
+
+void main() {
+  float line = mod(vUv.y * uResolutionY, 2.0);  // alternating 1px rows
+  float scanline = line < 1.0 ? 0.85 : 1.0;    // darken every other row
+  // Multiply over your base color/texture:
+  gl_FragColor = vec4(vec3(scanline), 1.0);
+  // In practice, mix this into your final composite:
+  // gl_FragColor = baseColor * scanline;
+}
+```
+
+Compositing in r3f (Three.js EffectComposer pattern):
+```tsx
+// Use @react-three/postprocessing for clean effect stacking
+// Or run glitch as a final pass over the feedback render target
+// uIntensity can be driven from audio (bass), a Reanimated shared value, or a JS ref
+```
+
 **r3f / React integration pattern:**
 
 ```tsx
@@ -897,6 +994,60 @@ function FeedbackEffect() {
 | Hover reveal card | CSS `position:absolute` + `transform` | scale + opacity, set `transform-origin` to edge nearest trigger |
 | Simulated async progress | Framer Motion `useMotionValue` / Reanimated `withTiming` | asymptote to 95%, snap to 100% on complete |
 | Optimistic UI state | Framer Motion `AnimatePresence` + local state | animate instantly, rollback in catch |
+
+**Number count-up — animate a displayed number from 0 to target:**
+
+```tsx
+// React (Framer Motion useMotionValue + useTransform)
+'use client'
+import { useEffect } from 'react'
+import { useMotionValue, useTransform, animate, motion } from 'framer-motion'
+
+function CountUp({ to, duration = 1.2, decimals = 0 }: { to: number; duration?: number; decimals?: number }) {
+  const count = useMotionValue(0)
+  const rounded = useTransform(count, (v) => v.toFixed(decimals))
+
+  useEffect(() => {
+    const controls = animate(count, to, { duration, ease: [0.25, 1, 0.5, 1] })
+    return controls.stop
+  }, [to])
+
+  return <motion.span>{rounded}</motion.span>
+}
+// Usage: <CountUp to={847} duration={1.5} /> → animates "0" → "847"
+// For a score out of 10: <CountUp to={7.4} duration={0.9} decimals={1} />
+```
+
+```tsx
+// React Native (Reanimated 3) — drives a Text via useAnimatedProps
+import Animated, { useSharedValue, withTiming, useAnimatedProps, Easing } from 'react-native-reanimated'
+import { TextInput } from 'react-native'
+
+const AnimatedTextInput = Animated.createAnimatedComponent(TextInput)
+
+function CountUp({ to, duration = 1200 }: { to: number; duration?: number }) {
+  const count = useSharedValue(0)
+
+  useEffect(() => {
+    count.value = withTiming(to, { duration, easing: Easing.out(Easing.cubic) })
+  }, [to])
+
+  const animatedProps = useAnimatedProps(() => ({
+    text: String(Math.round(count.value)),
+    defaultValue: '0',
+  }))
+
+  return (
+    <AnimatedTextInput
+      animatedProps={animatedProps}
+      editable={false}
+      style={{ color: '#fff', fontSize: 48, fontFamily: 'JetBrainsMono' }}
+    />
+  )
+}
+```
+
+Duration rule: **match duration to magnitude** — a score out of 10 deserves ~600ms; a large stat like 12,450 deserves 1.5–2s. Don't use the same duration for both.
 
 **Loading progress bar patterns:**
 
@@ -1729,6 +1880,73 @@ recognition.onresult = (e) => {
 }
 recognition.start()
 ```
+
+**Photobooth capture flash + countdown animation:**
+
+The two animation moments every photobooth needs: a countdown before capture, and a flash on shutter.
+
+```js
+// Capture flash — white overlay that appears instantly and fades out fast
+// Pure CSS + JS class toggle: no library needed
+function triggerFlash(overlayEl) {
+  overlayEl.style.opacity = '1'
+  // Force reflow so the transition fires from opacity:1, not from wherever it was
+  void overlayEl.offsetWidth
+  overlayEl.style.transition = 'opacity 400ms ease-out'
+  overlayEl.style.opacity = '0'
+}
+// CSS: .flash-overlay { position:fixed; inset:0; background:#fff; opacity:0; pointer-events:none; z-index:999; }
+```
+
+```tsx
+// React — Framer Motion flash
+import { useAnimate } from 'framer-motion'
+
+function useFlash() {
+  const [scope, animate] = useAnimate()
+  const flash = async () => {
+    await animate(scope.current, { opacity: 1 }, { duration: 0 })      // instant white
+    await animate(scope.current, { opacity: 0 }, { duration: 0.4, ease: 'easeOut' })
+  }
+  return { scope, flash }
+}
+// <div ref={scope} className="fixed inset-0 bg-white pointer-events-none z-50 opacity-0" />
+```
+
+```tsx
+// Countdown timer — 3…2…1…GO with scale pop per tick
+import { useState, useEffect } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+
+function Countdown({ from = 3, onComplete }: { from?: number; onComplete: () => void }) {
+  const [count, setCount] = useState(from)
+
+  useEffect(() => {
+    if (count === 0) { onComplete(); return }
+    const t = setTimeout(() => setCount(c => c - 1), 1000)
+    return () => clearTimeout(t)
+  }, [count])
+
+  return (
+    <AnimatePresence mode="popLayout">
+      <motion.div
+        key={count}
+        initial={{ scale: 1.6, opacity: 0 }}
+        animate={{ scale: 1,   opacity: 1 }}
+        exit={{    scale: 0.6, opacity: 0 }}
+        transition={{ type: 'spring', stiffness: 500, damping: 25 }}
+        className="text-8xl font-bold text-white tabular-nums"
+      >
+        {count === 0 ? '📸' : count}
+      </motion.div>
+    </AnimatePresence>
+  )
+}
+```
+
+React Native countdown uses the same pattern with `MotiView` or `Animated.View` + `withSpring`.
+
+Key: use `mode="popLayout"` not `mode="wait"` — `popLayout` removes the exiting element from layout immediately so the incoming number pops in cleanly without waiting.
 
 **Dominant color extraction from a video/canvas frame — for aura and palette effects:**
 
