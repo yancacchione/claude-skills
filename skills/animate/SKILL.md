@@ -353,6 +353,46 @@ Without `@property`, CSS transitions on `--custom-vars` snap instead of interpol
 
 Support: Chrome 85+, Safari 16.4+, Firefox 128+. For the phosphor/neon aesthetic, this replaces opacity-only glow animations with true color-shift animations.
 
+**`:has()` — parent/ancestor state from child state, no JS needed:**
+
+CSS `:has()` lets a parent element respond to its child's CSS state (focus, checked, open) without JavaScript. Replaces the common pattern of toggling a class on a parent from a JS event listener.
+
+```css
+/* Floating label — rises when input is focused or filled */
+.field .label {
+  transform: translateY(0) scale(1);
+  transition: transform 200ms ease-out;
+}
+.field:has(input:focus) .label,
+.field:has(input:not(:placeholder-shown)) .label {
+  transform: translateY(-20px) scale(0.8);
+}
+
+/* Option card dims when its checkbox is checked */
+.option {
+  transition: opacity 150ms, transform 150ms ease-out;
+}
+.option:has(input[type="checkbox"]:checked) {
+  opacity: 0.45;
+  transform: scale(0.97);
+}
+
+/* Nav blurs when a dropdown inside it is expanded */
+.nav:has([aria-expanded="true"]) {
+  backdrop-filter: blur(8px);
+  transition: backdrop-filter 200ms ease-out;
+}
+
+/* Sibling: next element after a focused input (e.g. show helper text) */
+input:focus + .helper {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 150ms, transform 150ms ease-out;
+}
+```
+
+Support: Chrome 105+, Safari 15.4+, Firefox 121+. Use `:has()` when the trigger is a CSS-native state (`:focus`, `:checked`, `:placeholder-shown`, `[open]`, `[aria-expanded]`). Fall back to JS/Framer Motion when the state is app-level (React state, URL, async), the animation is sequential, or you need exit animations.
+
 ### Next.js App Router — animation constraints
 
 Every Framer Motion, Reanimated, or motion-hook call requires a client component. In Next.js App Router:
@@ -528,6 +568,94 @@ const fling = Gesture.Pan()
 // For snapping to a grid after decay, combine with onEnd checking final position + withSpring.
 ```
 
+**Bottom sheet with snap points:**
+
+The assembled pattern — drag handle, snap-to-nearest, fling-to-close, dimming backdrop:
+
+```tsx
+import { Dimensions, StyleSheet } from 'react-native'
+import Animated, { useSharedValue, useAnimatedStyle, withSpring,
+  runOnJS, interpolate, Extrapolation } from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import { useEffect } from 'react'
+
+const { height: SCREEN_H } = Dimensions.get('window')
+const SNAP_OPEN   = 0               // fully open — sheet top is at screen top
+const SNAP_HALF   = SCREEN_H * 0.5  // half-open
+const SNAP_CLOSED = SCREEN_H        // fully off-screen
+
+function BottomSheet({ onClose }: { onClose: () => void }) {
+  const translateY = useSharedValue(SCREEN_H) // starts offscreen
+  const startY     = useSharedValue(0)
+
+  useEffect(() => {
+    translateY.value = withSpring(SNAP_OPEN, { damping: 22, stiffness: 200 })
+  }, [])
+
+  const pan = Gesture.Pan()
+    .onStart(() => { startY.value = translateY.value })
+    .onUpdate((e) => {
+      translateY.value = Math.max(0, startY.value + e.translationY)
+    })
+    .onEnd((e) => {
+      'worklet'
+      // Fast downward fling → close immediately
+      if (e.velocityY > 800) {
+        translateY.value = withSpring(SNAP_CLOSED, { damping: 22 }, (finished) => {
+          if (finished) runOnJS(onClose)()
+        })
+        return
+      }
+      // Snap to nearest point
+      const pts = [SNAP_OPEN, SNAP_HALF, SNAP_CLOSED]
+      const snap = pts.reduce((a, b) => Math.abs(b - translateY.value) < Math.abs(a - translateY.value) ? b : a)
+      translateY.value = withSpring(snap, { damping: 22, stiffness: 200 }, (finished) => {
+        if (finished && snap === SNAP_CLOSED) runOnJS(onClose)()
+      })
+    })
+
+  const sheetStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: translateY.value }],
+  }))
+  const backdropStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(translateY.value, [SNAP_OPEN, SNAP_HALF], [0.55, 0.15], Extrapolation.CLAMP),
+  }))
+
+  return (
+    <>
+      <Animated.View
+        style={[StyleSheet.absoluteFill, { backgroundColor: '#000' }, backdropStyle]}
+        onTouchEnd={onClose}
+      />
+      <GestureDetector gesture={pan}>
+        <Animated.View style={[styles.sheet, sheetStyle]}>
+          <Animated.View style={styles.handle} />
+          {/* sheet content */}
+        </Animated.View>
+      </GestureDetector>
+    </>
+  )
+}
+
+const styles = StyleSheet.create({
+  sheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    backgroundColor: '#111', borderTopLeftRadius: 16, borderTopRightRadius: 16,
+    minHeight: SCREEN_H * 0.5, paddingBottom: 32,
+  },
+  handle: {
+    width: 36, height: 4, borderRadius: 2, backgroundColor: '#444',
+    alignSelf: 'center', marginTop: 10, marginBottom: 8,
+  },
+})
+```
+
+Key rules:
+- **`startY` in `onStart`** — capture sheet position at gesture start so `onUpdate` offsets from that, not from 0. Without this, the sheet jumps on first touch.
+- **`Math.max(0, ...)`** — prevents dragging above the fully-open position.
+- **Velocity threshold** — fast downward fling closes even if the sheet is near the top.
+- For nested `FlatList`/`ScrollView` inside the sheet, use `@gorhom/bottom-sheet` which handles the scroll-vs-pan conflict automatically.
+
 **`useAnimatedKeyboard` — keyboard-aware layouts without KeyboardAvoidingView:**
 
 ```tsx
@@ -636,6 +764,79 @@ Rules:
 - `useAnimatedReaction` = side effects when a value crosses a threshold (haptics, `runOnJS`).
 - Never call `useDerivedValue` just to trigger a JS effect — that produces silent worklet errors.
 
+**`useAnimatedRef` + `measure` — get rendered position on the UI thread:**
+
+Needed when an animation's origin depends on where a component was actually rendered (overlay positioning, origin-aware expand, shared-element-like effects in RN):
+
+```tsx
+import { useAnimatedRef, measure, runOnUI, useSharedValue, useAnimatedStyle } from 'react-native-reanimated'
+
+// Get screen-relative coordinates of a rendered component
+function useOriginCapture() {
+  const ref   = useAnimatedRef<Animated.View>()
+  const pageX = useSharedValue(0)
+  const pageY = useSharedValue(0)
+  const width = useSharedValue(0)
+
+  const capture = () => {
+    runOnUI(() => {
+      'worklet'
+      const layout = measure(ref)
+      if (!layout) return // null if not yet rendered
+      // layout: { x, y } (relative to parent) + { pageX, pageY } (screen-relative) + { width, height }
+      pageX.value = layout.pageX
+      pageY.value = layout.pageY
+      width.value = layout.width
+    })()
+  }
+
+  return { ref, pageX, pageY, width, capture }
+}
+
+// Practical use: position a floating tooltip above the tapped element
+function TagWithTooltip({ label }: { label: string }) {
+  const [open, setOpen] = useState(false)
+  const { ref, pageX, pageY, width, capture } = useOriginCapture()
+  const tipX = useSharedValue(0)
+  const tipY = useSharedValue(0)
+
+  const tipStyle = useAnimatedStyle(() => ({
+    position: 'absolute',
+    left: tipX.value,
+    top:  tipY.value,
+  }))
+
+  const handlePress = () => {
+    capture()
+    runOnUI(() => {
+      'worklet'
+      tipX.value = pageX.value + width.value / 2 - 60 // centered over tag
+      tipY.value = pageY.value - 48                    // above it
+    })()
+    setOpen(true)
+  }
+
+  return (
+    <>
+      <Animated.View ref={ref}>
+        <Pressable onPress={handlePress}><Text>{label}</Text></Pressable>
+      </Animated.View>
+      {open && (
+        <Animated.View style={[styles.tooltip, tipStyle]}>
+          <Text style={styles.tipText}>Tooltip content</Text>
+        </Animated.View>
+      )}
+    </>
+  )
+}
+```
+
+Rules:
+- `measure()` runs on the UI thread only — always call inside `runOnUI()`
+- Returns `null` if the component hasn't rendered yet — always null-check
+- Use `pageX/pageY` for absolute screen positioning; `x/y` for parent-relative
+- Call `capture()` in response to a user interaction (press, gesture) — not on mount
+
 **Haptics coordination — pair physical feedback with spring animation completion:**
 
 ```tsx
@@ -678,6 +879,56 @@ import { Stack } from 'expo-router'
 <Animated.Image source={item.img} sharedTransitionTag={`image-${item.id}`} />
 // No extra config needed — Reanimated handles the morph automatically
 ```
+
+**`useFocusEffect` — animation that reruns every time the screen gains focus:**
+
+`useEffect` runs once on mount. `useFocusEffect` runs on every navigation event that brings the screen into view (tab tap, stack push, modal open, back navigation).
+
+```tsx
+import { useFocusEffect } from 'expo-router'
+import { useCallback } from 'react'
+import { useSharedValue, withSpring, withTiming, useAnimatedStyle } from 'react-native-reanimated'
+
+// Screen entrance that replays on every visit
+function useScreenEntrance() {
+  const opacity    = useSharedValue(0)
+  const translateY = useSharedValue(16)
+
+  useFocusEffect(
+    useCallback(() => {
+      // animate in on focus
+      opacity.value    = withTiming(1, { duration: 250 })
+      translateY.value = withSpring(0, { damping: 22, stiffness: 300 })
+
+      return () => {
+        // reset on blur so the animation replays next visit
+        opacity.value    = 0
+        translateY.value = 16
+      }
+    }, []) // [] is intentional — effect identity must be stable
+  )
+
+  return useAnimatedStyle(() => ({
+    opacity: opacity.value,
+    transform: [{ translateY: translateY.value }],
+  }))
+}
+
+// Usage — wrap screen root:
+export default function LibraryScreen() {
+  const screenStyle = useScreenEntrance()
+  return <Animated.View style={[{ flex: 1 }, screenStyle]}>{/* content */}</Animated.View>
+}
+```
+
+| Hook | Runs |
+|------|------|
+| `useEffect([])` | Once on component mount |
+| `useFocusEffect` | Every time the screen is navigated to |
+
+**Critical**: wrap the callback in `useCallback` with `[]` deps. `useFocusEffect` re-subscribes whenever the callback reference changes — a new function on every render means the effect fires repeatedly. `useCallback([])` pins it to one reference.
+
+Omit the cleanup return if the screen should not reset between visits (e.g. a one-time intro that plays only on first mount — use `useEffect` for that instead).
 
 ### Moti (Expo — simpler Reanimated 3 wrapper)
 
