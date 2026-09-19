@@ -691,6 +691,31 @@ function CommentInput() {
 | Playful / game UI | 8 | 180 | Bouncy, fun |
 | Modal slide-up | 25 | 250 | Purposeful, settled |
 
+**`withSpring` fine-tuning — control when the spring is "done":**
+
+Springs run until they settle below two thresholds. The defaults are conservative and can cause unnecessary extra frames or premature cutoffs.
+
+```tsx
+translateY.value = withSpring(targetValue, {
+  damping: 20,
+  stiffness: 200,
+  mass: 1,                         // heavier = slower start and longer tail
+  overshootClamping: false,        // true = no bounce past target (toasts, snackbars)
+  restDisplacementThreshold: 0.01, // stop when |position - target| < this (px)
+  restSpeedThreshold: 2,           // stop when |velocity| < this (px/s) — main knob to tune
+})
+```
+
+| Scenario | Adjustment |
+|----------|-----------|
+| Spring never seems to fully settle | Lower `restSpeedThreshold` (2 → 0.5) |
+| Spring cuts off before visually settling | Raise `restSpeedThreshold` (2 → 8) |
+| Toast / snackbar must not bounce | `overshootClamping: true` |
+| Heavy card flip / dramatic entrance | `mass: 1.5` — builds momentum, longer tail |
+| Spring chews CPU on a long tail | Raise `restSpeedThreshold` — declares done sooner, no visible difference |
+
+Defaults: `restDisplacementThreshold: 0.001`, `restSpeedThreshold: 2`. The displacement threshold is already very tight; the speed threshold is the one to tune in practice.
+
 **`interpolate` — map a shared value to an output range (essential for scroll-driven UIs):**
 
 ```tsx
@@ -711,6 +736,41 @@ const tabStyle = useAnimatedStyle(() => ({
   transform: [{ scaleY: interpolate(scrollY.value, [-20, 0, 80], [1.05, 1, 0.9], Extrapolation.CLAMP) }],
 }))
 ```
+
+**`interpolateColor` — interpolate between colors using a shared value:**
+
+Unlike numeric `interpolate`, colors need `interpolateColor` to blend correctly. Use it anywhere a style's color value changes in response to animation — progress bars, button states, theme transitions.
+
+```tsx
+import { interpolateColor, Extrapolation } from 'react-native-reanimated'
+
+// Progress bar that shifts red → amber → green by fill level
+const progress = useSharedValue(0) // 0–1
+const barStyle = useAnimatedStyle(() => ({
+  backgroundColor: interpolateColor(
+    progress.value,
+    [0,         0.5,       1        ],  // input range
+    ['#ef4444', '#f59e0b', '#22c55e'], // colors at each stop
+    'RGB',                             // 'RGB' (default) or 'HSV'
+    Extrapolation.CLAMP,
+  ),
+}))
+
+// Button press tint
+const pressed = useSharedValue(0)
+const btnStyle = useAnimatedStyle(() => ({
+  backgroundColor: interpolateColor(pressed.value, [0, 1], ['#18181b', '#3f3f46']),
+}))
+const gesture = Gesture.Tap()
+  .onBegin(() => { pressed.value = withTiming(1, { duration: 80 }) })
+  .onFinalize(() => { pressed.value = withTiming(0, { duration: 200 }) })
+```
+
+Color space:
+- `'RGB'` (default): straight component blend — can produce grey midpoints when mixing complementaries
+- `'HSV'`: blends through hue — better for rainbow or score gradients; avoids muddy midpoints
+- Theme light→dark switch: use `'RGB'` (both are neutral tones)
+- Health/score gradient (red→yellow→green): `'HSV'` produces cleaner mid-transitions
 
 **`useAnimatedReaction` — worklet side-effect when a shared value crosses a threshold:**
 
@@ -929,6 +989,62 @@ export default function LibraryScreen() {
 **Critical**: wrap the callback in `useCallback` with `[]` deps. `useFocusEffect` re-subscribes whenever the callback reference changes — a new function on every render means the effect fires repeatedly. `useCallback([])` pins it to one reference.
 
 Omit the cleanup return if the screen should not reset between visits (e.g. a one-time intro that plays only on first mount — use `useEffect` for that instead).
+
+**`useAnimatedSensor` — tilt / gyroscope-driven parallax (Reanimated 3):**
+
+Reads device accelerometer/gyroscope data directly on the UI thread — no JS bridge, no polling. Creates the illusion of depth in a card, background layer, or floating element.
+
+```tsx
+import {
+  useAnimatedSensor, SensorType,
+  useAnimatedStyle, interpolate, Extrapolation,
+} from 'react-native-reanimated'
+import Animated from 'react-native-reanimated'
+
+function TiltCard({ children }: { children: React.ReactNode }) {
+  // ROTATION gives pitch (forward/back) and roll (left/right) in radians
+  const sensor = useAnimatedSensor(SensorType.ROTATION, { interval: 16 }) // ~60fps
+
+  const cardStyle = useAnimatedStyle(() => {
+    const { pitch, roll } = sensor.sensor.value
+    return {
+      transform: [
+        { perspective: 800 },
+        { rotateX: `${interpolate(pitch, [-0.5, 0.5], [-8, 8], Extrapolation.CLAMP)}deg` },
+        { rotateY: `${interpolate(roll,  [-0.5, 0.5], [8, -8], Extrapolation.CLAMP)}deg` },
+      ],
+    }
+  })
+
+  // Background layer moves counter to the tilt — creates depth
+  const bgStyle = useAnimatedStyle(() => {
+    const { pitch, roll } = sensor.sensor.value
+    return {
+      transform: [
+        { translateX: interpolate(roll,  [-0.5, 0.5], [-12, 12], Extrapolation.CLAMP) },
+        { translateY: interpolate(pitch, [-0.5, 0.5], [-12, 12], Extrapolation.CLAMP) },
+      ],
+    }
+  })
+
+  return (
+    <Animated.View style={[styles.card, cardStyle]}>
+      <Animated.View style={[StyleSheet.absoluteFill, bgStyle]}>{/* background */}</Animated.View>
+      {children}
+    </Animated.View>
+  )
+}
+```
+
+`SensorType` options:
+- `ROTATION` — pitch/roll/yaw (best for tilt parallax, card depth)
+- `ACCELEROMETER` — raw x/y/z in m/s² (good for shake detection, inertia effects)
+- `GYROSCOPE` — angular velocity (good for motion-blur drives)
+
+`interval`: `16` = every frame. Use `100+` for low-priority reads to save battery.
+`interval: 'auto'` lets Reanimated pick the fastest rate the device supports.
+
+Android requires `BODY_SENSORS` permission — add to `app.json` → `android.permissions`. iOS has no prompt requirement for motion data.
 
 ### Moti (Expo — simpler Reanimated 3 wrapper)
 
