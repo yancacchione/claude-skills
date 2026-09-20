@@ -393,6 +393,25 @@ input:focus + .helper {
 
 Support: Chrome 105+, Safari 15.4+, Firefox 121+. Use `:has()` when the trigger is a CSS-native state (`:focus`, `:checked`, `:placeholder-shown`, `[open]`, `[aria-expanded]`). Fall back to JS/Framer Motion when the state is app-level (React state, URL, async), the animation is sequential, or you need exit animations.
 
+**`text-wrap: balance` — eliminate orphaned last words in multi-line quotes:**
+
+Without it, a quote can end with a single short word on its own line, which looks awkward especially at large type sizes. `balance` re-flows the text so all lines have roughly equal length.
+
+```css
+/* Apply to quote text and short headlines — not body copy (too much reflow) */
+.quote-text {
+  text-wrap: balance;
+  /* Limit to ~6 lines — beyond that, the algorithm's performance degrades */
+}
+```
+
+Support: Chrome 114+, Safari 17.5+, Firefox 121+. No fallback needed — ignored gracefully in older browsers.
+
+When to use vs. `pretty`:
+- `text-wrap: balance` — equal line lengths. Best for short display text (quotes, headings, CTAs).
+- `text-wrap: pretty` — avoids widows (lone last words). Best for body paragraphs. Chrome 117+.
+- `text-wrap: nowrap` — no wrapping. For single-line labels, tags, badges.
+
 ### Next.js App Router — animation constraints
 
 Every Framer Motion, Reanimated, or motion-hook call requires a client component. In Next.js App Router:
@@ -532,6 +551,30 @@ const headerStyle = useAnimatedStyle(() => ({
   transform: [{ translateY: -scrollY.value * 0.3 }],
 }))
 // <Animated.ScrollView onScroll={scrollHandler} scrollEventThrottle={16}>
+
+// Simpler alternative for scroll-driven styles: useScrollViewOffset (Reanimated 3.3+)
+// No handler, no scrollEventThrottle — just pass an Animated ref
+import { useAnimatedRef, useScrollViewOffset } from 'react-native-reanimated'
+
+function StickyHeader() {
+  const scrollRef = useAnimatedRef<Animated.ScrollView>()
+  const scrollOffset = useScrollViewOffset(scrollRef) // read-only SharedValue<number>
+
+  const headerStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(scrollOffset.value, [0, 80], [0, 1], Extrapolation.CLAMP),
+    transform: [{ translateY: interpolate(scrollOffset.value, [0, 80], [-8, 0], Extrapolation.CLAMP) }],
+  }))
+
+  return (
+    <Animated.ScrollView ref={scrollRef} scrollEventThrottle={16}>
+      <Animated.View style={[styles.stickyHeader, headerStyle]} />
+      {/* content */}
+    </Animated.ScrollView>
+  )
+}
+// useScrollViewOffset vs useAnimatedScrollHandler:
+// - useScrollViewOffset: simpler, for read-only scroll position → derived styles
+// - useAnimatedScrollHandler: use when you need onBeginDrag, onEndDrag, onMomentumEnd events
 
 // Layout animation (list reorder, add/remove items)
 <Animated.View layout={LinearTransition.springify().damping(20)}>
@@ -680,6 +723,41 @@ function CommentInput() {
 // Works on both iOS and Android; no LayoutAnimation or KeyboardAvoidingView needed.
 // Note: requires Reanimated 3.1+ and enableExperimentalWebImplementation for web.
 ```
+
+**`Easing` module — the presets for `withTiming`:**
+
+Springs are for direct-touch interactions. Everything else uses `withTiming` — the `Easing` module controls its curve.
+
+```tsx
+import { Easing } from 'react-native-reanimated'
+
+// The useful subset:
+withTiming(val, { duration: 300, easing: Easing.out(Easing.cubic) })    // decelerate (enter, reveal)
+withTiming(val, { duration: 200, easing: Easing.in(Easing.cubic) })     // accelerate (exit, remove)
+withTiming(val, { duration: 250, easing: Easing.inOut(Easing.cubic) }) // S-curve (state swap)
+withTiming(val, { duration: 600, easing: Easing.out(Easing.elastic(1.2)) }) // bounce without spring overhead
+withTiming(val, { duration: 200, easing: Easing.bezier(0.34, 1.56, 0.64, 1) }) // spring-like with exact control
+
+// Easing.out/in/inOut are wrappers — they take any base curve:
+// .poly(n): power curve  (n=2 = quad, n=3 = cubic, n=4 = quart)
+// .sin:     sine curve
+// .circle:  circular curve (more aggressive than cubic at ends)
+// .elastic(bounciness): overshoot + settle — use only for decorative enters
+// .bounce:  like elastic but bounces multiple times — rarely appropriate
+// .bezier(x1, y1, x2, y2): custom cubic-bezier matching CSS/Figma values
+
+// Rule: Easing.out(Easing.cubic) is the default for almost everything.
+// Easing.linear has its place: progress bars, loaders, color temperature shifts.
+```
+
+| Situation | Easing choice |
+|-----------|--------------|
+| UI element entering screen | `Easing.out(Easing.cubic)` |
+| UI element leaving screen | `Easing.in(Easing.cubic)` |
+| State swap (both directions) | `Easing.inOut(Easing.cubic)` |
+| Loading bar / count-up | `Easing.out(Easing.quad)` — eases near end |
+| Playful spring-without-spring | `Easing.out(Easing.elastic(1))` |
+| Mechanical / robotic intentionally | `Easing.linear` |
 
 **Spring presets for common RN contexts:**
 
@@ -989,6 +1067,41 @@ export default function LibraryScreen() {
 **Critical**: wrap the callback in `useCallback` with `[]` deps. `useFocusEffect` re-subscribes whenever the callback reference changes — a new function on every render means the effect fires repeatedly. `useCallback([])` pins it to one reference.
 
 Omit the cleanup return if the screen should not reset between visits (e.g. a one-time intro that plays only on first mount — use `useEffect` for that instead).
+
+**`cancelAnimation` — stop a running animation immediately:**
+
+Essential when a `withRepeat(-1, ...)` loop or long `withTiming` must be stopped on blur/unmount, or when new input should interrupt an in-flight animation.
+
+```tsx
+import { cancelAnimation, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated'
+
+function PulsingDot() {
+  const scale = useSharedValue(1)
+
+  useFocusEffect(
+    useCallback(() => {
+      scale.value = withRepeat(
+        withTiming(1.3, { duration: 700 }),
+        -1,          // infinite
+        true         // reverse: ping-pong between 1 and 1.3
+      )
+
+      return () => {
+        cancelAnimation(scale)  // stops the loop immediately on blur
+        scale.value = 1         // reset to rest state
+      }
+    }, [])
+  )
+
+  const style = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }))
+  return <Animated.View style={[styles.dot, style]} />
+}
+```
+
+Rules:
+- `cancelAnimation` halts the animation but **does not reset the value** — assign `scale.value = target` after if you want a specific rest state.
+- Always cancel repeating loops in cleanup (`useFocusEffect` return, `useEffect` return, unmount). An uncancelled `withRepeat(-1)` keeps running after the component is gone, wasting UI thread work.
+- In a gesture `.onEnd`, you don't need `cancelAnimation` — starting a new `withSpring` on a shared value automatically cancels the previous animation on that value.
 
 **`useAnimatedSensor` — tilt / gyroscope-driven parallax (Reanimated 3):**
 
