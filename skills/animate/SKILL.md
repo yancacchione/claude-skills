@@ -1159,6 +1159,59 @@ function TiltCard({ children }: { children: React.ReactNode }) {
 
 Android requires `BODY_SENSORS` permission — add to `app.json` → `android.permissions`. iOS has no prompt requirement for motion data.
 
+**`LayoutAnimationConfig` + FlatList — control which items animate on first render:**
+
+On first render, a list with `entering` on each item plays all entering animations simultaneously — visually chaotic. `LayoutAnimationConfig` controls this.
+
+```tsx
+import Animated, {
+  FadeInDown, FadeOut, LinearTransition, LayoutAnimationConfig,
+} from 'react-native-reanimated'
+import { FlatList } from 'react-native'
+
+// Pattern A: Animate new items in (realtime adds), suppress on initial render
+function LiveList<T extends { id: string }>({ data }: { data: T[] }) {
+  return (
+    <LayoutAnimationConfig skipEntering>
+      <FlatList
+        data={data}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) => (
+          <Animated.View
+            entering={FadeInDown.duration(280)}
+            exiting={FadeOut.duration(200)}
+            layout={LinearTransition.springify().damping(18)}
+          >
+            {/* item content */}
+          </Animated.View>
+        )}
+      />
+    </LayoutAnimationConfig>
+  )
+}
+
+// Pattern B: Stagger on initial load — no LayoutAnimationConfig, every item enters with delay
+function StaggeredList<T extends { id: string }>({ data }: { data: T[] }) {
+  return (
+    <FlatList
+      data={data}
+      keyExtractor={(item) => item.id}
+      renderItem={({ item, index }) => (
+        <Animated.View entering={FadeInDown.delay(index * 30).duration(300)}>
+          {/* item content */}
+        </Animated.View>
+      )}
+    />
+  )
+}
+```
+
+Rules:
+- `skipEntering` suppresses entering animations on items that **exist at mount** — items added afterward still animate in (correct behavior for realtime lists)
+- Put `entering`/`exiting`/`layout` on the `Animated.View` inside `renderItem`, not on `FlatList` itself
+- `layout={LinearTransition.springify()}` smoothly shifts existing items when items are added or removed
+- For 100+ item lists, prefer `@shopify/flash-list` — drop-in replacement with better virtualization; wrap with `Animated.createAnimatedComponent(FlashList)` to keep entering/layout support
+
 ### Moti (Expo — simpler Reanimated 3 wrapper)
 
 ```tsx
@@ -1695,6 +1748,59 @@ function PublishableRow({ quote, onPublish }: { quote: Quote; onPublish: (id: st
 ```
 
 Rollback rule: always store the previous state before the optimistic update — `const prev = currentState` — so you can restore it in the catch block. The error state triggers its own micro-animation (shake, color change, or inline message — not a toast).
+
+**React 19 / Next.js 15 — `useOptimistic` with server actions:**
+
+For server actions, `useOptimistic` eliminates the manual rollback — React reverts automatically on error:
+
+```tsx
+'use client'
+import { useOptimistic, useTransition } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { publishQuote } from '@/app/actions' // 'use server' action
+
+function PublishableRow({ quote }: { quote: Quote }) {
+  const [isPending, startTransition] = useTransition()
+  const [optimisticPublished, setOptimistic] = useOptimistic(
+    quote.published,
+    (_state, newValue: boolean) => newValue
+  )
+
+  const handlePublish = () => {
+    startTransition(async () => {
+      setOptimistic(true)       // immediate — no await
+      await publishQuote(quote.id)
+      // if publishQuote throws, React automatically reverts to quote.published
+    })
+  }
+
+  return (
+    <motion.div animate={{ opacity: optimisticPublished ? 1 : 0.6 }} transition={{ duration: 0.2 }}>
+      <AnimatePresence mode="wait">
+        {optimisticPublished ? (
+          <motion.span key="pub"
+            initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
+            {isPending ? 'PUBLISHING…' : 'PUBLISHED'}
+          </motion.span>
+        ) : (
+          <motion.button key="draft" onClick={handlePublish} disabled={isPending}
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            PUBLISH
+          </motion.button>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  )
+}
+```
+
+The animation code is identical to the manual pattern — only state management differs. `useOptimistic` overlays the optimistic value during the transition; after the action settles, the overlay lifts and the real server value shows through.
+
+| Pattern | Use when |
+|---------|---------|
+| `useOptimistic` | Next.js 15 server actions, React 19 form actions |
+| Manual `useState` | REST API / `fetch` calls, React < 19, non-server-action async |
 
 ---
 
