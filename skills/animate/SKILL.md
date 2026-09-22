@@ -1159,6 +1159,71 @@ function TiltCard({ children }: { children: React.ReactNode }) {
 
 Android requires `BODY_SENSORS` permission — add to `app.json` → `android.permissions`. iOS has no prompt requirement for motion data.
 
+**`expo-image` — blurhash placeholder transitions (Expo):**
+
+`expo-image` has a built-in `transition` prop and blurhash `placeholder` that handles loading → loaded cross-dissolve with zero animation code. Use it everywhere you'd otherwise manage a loading shimmer manually.
+
+```tsx
+import { Image } from 'expo-image'
+
+// Basic fade-in on load
+<Image
+  source={{ uri: book.coverUrl }}
+  style={{ width: 120, height: 180, borderRadius: 8 }}
+  transition={300}
+  contentFit="cover"
+  cachePolicy="memory-disk"
+/>
+
+// Blurhash placeholder — blurry shape while loading, cross-dissolves to real image
+<Image
+  source={{ uri: book.coverUrl }}
+  placeholder={{ blurhash: book.blurhash }} // e.g. 'L6PZfSi_.AyE_3t7t7R**0o#DgR4'
+  transition={{ duration: 400, effect: 'cross-dissolve' }}
+  style={{ width: 120, height: 180, borderRadius: 8 }}
+  contentFit="cover"
+  cachePolicy="memory-disk"
+  recyclingKey={book.id}   // prevents wrong image flash during fast FlatList scroll
+/>
+```
+
+`transition` options:
+- `300` — shorthand for `{ duration: 300, effect: 'cross-dissolve' }`
+- `{ duration, effect: 'cross-dissolve' | 'flip-from-top' | 'flip-from-left' | 'curl-up' }` — iOS-only for flip/curl; cross-dissolve works everywhere
+- `{ duration, timing: 'ease-in' | 'ease-out' | 'ease-in-out' | 'linear' }`
+
+`cachePolicy`:
+- `"memory"` (default) — re-fetches on cold launch
+- `"memory-disk"` — persists across sessions — correct for book covers that don't change
+- `"disk"` — disk only, no in-memory cache (large images)
+
+`recyclingKey`: Set to the item's stable id in any FlatList. Without it, expo-image reuses the component when rows virtualize and can flash the previous item's image briefly on fast scroll.
+
+**Generating a blurhash server-side** (Supabase Edge Function or on upload):
+```ts
+import { encode } from 'blurhash'
+import Jimp from 'jimp'
+
+async function getBlurhash(imageUrl: string): Promise<string> {
+  const image = await Jimp.read(imageUrl)
+  const { data, width, height } = image.bitmap
+  return encode(new Uint8ClampedArray(data), width, height, 4, 3)
+}
+// Store the result alongside the image URL in your DB (~30 chars, negligible payload)
+```
+
+For Supabase Storage uploads, generate the blurhash in a `storage.objects` insert trigger or an Edge Function triggered by the upload webhook, then write it back to the parent record.
+
+Fallback: if no blurhash is stored yet, pass a solid `placeholder` color instead:
+```tsx
+<Image
+  source={{ uri: book.coverUrl }}
+  placeholder={book.blurhash ?? '#1a1a1a'}  // solid dark bg if hash missing
+  transition={300}
+  ...
+/>
+```
+
 **`LayoutAnimationConfig` + FlatList — control which items animate on first render:**
 
 On first render, a list with `entering` on each item plays all entering animations simultaneously — visually chaotic. `LayoutAnimationConfig` controls this.
