@@ -1277,6 +1277,169 @@ Rules:
 - `layout={LinearTransition.springify()}` smoothly shifts existing items when items are added or removed
 - For 100+ item lists, prefer `@shopify/flash-list` — drop-in replacement with better virtualization; wrap with `Animated.createAnimatedComponent(FlashList)` to keep entering/layout support
 
+**`Gesture.Tap` + `Gesture.LongPress` — interactive press and hold:**
+
+`Gesture.Pan()` is for drag. For tap feedback and hold gestures, use `Gesture.Tap()` and `Gesture.LongPress()`:
+
+```tsx
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import Animated, { useSharedValue, useAnimatedStyle,
+  withSpring, withTiming, runOnJS } from 'react-native-reanimated'
+
+// Tap — press-down visual + onPress callback
+const scale = useSharedValue(1)
+const tap = Gesture.Tap()
+  .onBegin(() => {
+    scale.value = withSpring(0.95, { damping: 15, stiffness: 400 })
+  })
+  .onFinalize(() => {
+    scale.value = withSpring(1, { damping: 15, stiffness: 400 })
+  })
+  .onEnd(() => {
+    runOnJS(handlePress)()  // fires only on successful tap (not on cancel)
+  })
+
+const pressStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }))
+
+// LongPress — fires after minDuration, with animated hold-progress indicator
+const holdProgress = useSharedValue(0)
+const longPress = Gesture.LongPress()
+  .minDuration(600)  // ms to hold before recognized
+  .onBegin(() => {
+    holdProgress.value = withTiming(1, { duration: 600 })  // animate a fill indicator
+  })
+  .onStart(() => {
+    runOnJS(handleLongPress)()  // fires after minDuration is reached
+  })
+  .onFinalize(() => {
+    holdProgress.value = withTiming(0, { duration: 200 })  // reset whether or not recognized
+  })
+
+// Compose: long press has priority; if not held, tap fires instead
+const composed = Gesture.Exclusive(longPress, tap)
+
+<GestureDetector gesture={composed}>
+  <Animated.View style={[styles.card, pressStyle]}>
+    {/* content */}
+  </Animated.View>
+</GestureDetector>
+```
+
+Lifecycle rules:
+- `onBegin` — touch-down, before recognition. Use for press-down visuals (scale, color).
+- `onStart` — gesture officially activated (after `minDuration` for LongPress).
+- `onEnd` — gesture succeeded and finger lifted.
+- `onFinalize` — always fires (success or cancel). Use for press-up visual reset.
+- `Gesture.Exclusive(a, b)` — `a` tried first; if `a` fails, `b` fires. Put LongPress first to give it priority over Tap.
+- Never call `runOnJS` in `onBegin` or `onFinalize` for navigation or state changes — only in `onEnd` / `onStart` where success is confirmed.
+
+**`Pressable` — lightweight alternative when no complex gesture is needed:**
+
+When the element only needs tap/hold and there's no `GestureDetector` parent, `Pressable` with `onPressIn/Out` is simpler than `GestureHandler`:
+
+```tsx
+import { Pressable } from 'react-native'
+import Animated, { useSharedValue, withSpring, useAnimatedStyle } from 'react-native-reanimated'
+
+function PressableCard({ onPress, children }: { onPress: () => void; children: React.ReactNode }) {
+  const scale = useSharedValue(1)
+
+  return (
+    <Pressable
+      onPressIn={() => { scale.value = withSpring(0.96, { damping: 15, stiffness: 400 }) }}
+      onPressOut={() => { scale.value = withSpring(1,    { damping: 15, stiffness: 400 }) }}
+      onPress={onPress}
+      onLongPress={onLongPress}          // built-in, no GestureHandler needed
+      delayLongPress={600}
+    >
+      <Animated.View style={useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }))}>
+        {children}
+      </Animated.View>
+    </Pressable>
+  )
+}
+```
+
+| Use `Pressable` when | Use `Gesture.Tap()` when |
+|---------------------|-------------------------|
+| Only tap + optional long-press needed | Composing with Pan, Pinch, or other gestures |
+| No parent `GestureDetector` on the element | `GestureDetector` already wraps the element |
+| Simple `onPress` callback | Need `onBegin`/`onEnd`/`onFinalize` lifecycle control |
+
+Mixing `Pressable` inside a `GestureDetector` causes responder conflicts — use one or the other on the same element.
+
+**Animated `TextInput` — focus border tint + error shake:**
+
+Standard form field pattern for React Native. Extracts the animation into a reusable hook so the `TextInput` component stays clean:
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedStyle, withTiming, withSequence,
+  interpolateColor,
+} from 'react-native-reanimated'
+import { TextInput, StyleSheet } from 'react-native'
+import * as Haptics from 'expo-haptics'
+
+function useFieldAnimation(hasError = false) {
+  const focus  = useSharedValue(0)
+  const shakeX = useSharedValue(0)
+
+  const style = useAnimatedStyle(() => ({
+    borderColor: hasError
+      ? '#ef4444'
+      : interpolateColor(focus.value, [0, 1], ['#3f3f46', '#a1a1aa']),
+    transform: [{ translateX: shakeX.value }],
+  }))
+
+  const onFocus = () => { focus.value = withTiming(1, { duration: 200 }) }
+  const onBlur  = () => { focus.value = withTiming(0, { duration: 150 }) }
+
+  const shake = () => {
+    shakeX.value = withSequence(
+      withTiming(-8, { duration: 55 }),
+      withTiming( 8, { duration: 55 }),
+      withTiming(-5, { duration: 55 }),
+      withTiming( 5, { duration: 55 }),
+      withTiming( 0, { duration: 55 }),
+    )
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error)
+  }
+
+  return { style, onFocus, onBlur, shake }
+}
+
+// Usage
+function BookTitleInput({ value, onChangeText }: { value: string; onChangeText: (v: string) => void }) {
+  const field = useFieldAnimation()
+
+  return (
+    <Animated.View style={[styles.inputContainer, field.style]}>
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        onFocus={field.onFocus}
+        onBlur={field.onBlur}
+        placeholder="Book title"
+        placeholderTextColor="#52525b"
+        style={styles.input}
+      />
+    </Animated.View>
+  )
+}
+
+// Call field.shake() from your submit handler on validation failure
+
+const styles = StyleSheet.create({
+  inputContainer: { borderWidth: 1, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 10 },
+  input: { color: '#fff', fontSize: 14, fontFamily: 'JetBrainsMono' },
+})
+```
+
+Rules:
+- Pass `hasError` to `useFieldAnimation` when the error state is known at render time (e.g. from react-hook-form). Call `shake()` imperatively on validation failure — the shake + haptic fires once, not on every render.
+- For multi-field forms, call one `useFieldAnimation()` per field and pass the hook's `onFocus`/`onBlur` directly to each `TextInput`.
+- `interpolateColor` handles the `hasError` branch with a ternary — `borderColor` is either a fixed red or a focus-driven interpolation. Don't try to run `interpolateColor` inside an `if` — it's a worklet call that must always execute.
+
 ### Moti (Expo — simpler Reanimated 3 wrapper)
 
 ```tsx
