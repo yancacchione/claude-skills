@@ -2133,6 +2133,82 @@ const handleTabPress = (index: number) => {
 
 Key: never toggle visibility of the indicator between tabs — let one indicator *slide* to the active position. A blinking-in indicator looks broken.
 
+**Tab content swap — animated horizontal pager (React Native):**
+
+The pattern for switching between two content sections (e.g. Quotes / Books) with a sliding tab bar + translateX pager — no library needed, no `react-navigation` required.
+
+```tsx
+import { Dimensions, Pressable, StyleSheet, Text, View } from 'react-native'
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring,
+} from 'react-native-reanimated'
+import { useState } from 'react'
+
+const TABS = ['Quotes', 'Books'] as const
+type Tab = typeof TABS[number]
+
+const { width: SCREEN_W } = Dimensions.get('window')
+const TAB_W = SCREEN_W / TABS.length
+
+function TabContent() {
+  const [activeTab, setActiveTab] = useState<Tab>('Quotes')
+  const translateX  = useSharedValue(0)
+  const indicatorX  = useSharedValue(0)
+
+  const selectTab = (tab: Tab, index: number) => {
+    setActiveTab(tab)
+    translateX.value  = withSpring(-index * SCREEN_W, { damping: 22, stiffness: 250 })
+    indicatorX.value  = withSpring(index * TAB_W,     { damping: 22, stiffness: 300 })
+  }
+
+  const contentStyle   = useAnimatedStyle(() => ({ transform: [{ translateX: translateX.value }] }))
+  const indicatorStyle = useAnimatedStyle(() => ({ transform: [{ translateX: indicatorX.value }] }))
+
+  return (
+    <View style={{ flex: 1 }}>
+      {/* Tab bar */}
+      <View style={styles.tabBar}>
+        {TABS.map((tab, i) => (
+          <Pressable key={tab} style={styles.tab} onPress={() => selectTab(tab, i)}>
+            <Text style={[styles.tabLabel, activeTab === tab && styles.activeLabel]}>{tab}</Text>
+          </Pressable>
+        ))}
+        <Animated.View style={[styles.indicator, indicatorStyle]} />
+      </View>
+
+      {/* Content pager — both pages sit side by side in a wide row, clipped to SCREEN_W */}
+      <View style={{ flex: 1, overflow: 'hidden' }}>
+        <Animated.View style={[{ flexDirection: 'row', width: SCREEN_W * TABS.length, flex: 1 }, contentStyle]}>
+          <View style={{ width: SCREEN_W, flex: 1 }}><QuotesList /></View>
+          <View style={{ width: SCREEN_W, flex: 1 }}><BooksList /></View>
+        </Animated.View>
+      </View>
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  tabBar: {
+    flexDirection: 'row', position: 'relative',
+    borderBottomWidth: 1, borderBottomColor: '#27272a',
+  },
+  tab: { flex: 1, alignItems: 'center', paddingVertical: 12 },
+  tabLabel: { fontSize: 13, color: '#71717a', fontFamily: 'JetBrainsMono' },
+  activeLabel: { color: '#fff' },
+  indicator: {
+    position: 'absolute', bottom: 0, height: 2,
+    width: TAB_W, backgroundColor: '#fff',
+  },
+})
+```
+
+Rules:
+- `overflow: 'hidden'` on the clip container is essential — without it the off-screen page is visible
+- `width: SCREEN_W * TABS.length` makes the row wide enough to hold all pages side-by-side
+- Match the spring configs for indicator and content so they feel coupled, not independent
+- To add swipe gestures between tabs: add a `Gesture.Pan` on the clip container that drives `translateX` live on `.onUpdate`, then snap to the nearest page index in `.onEnd` using `withSpring` + `runOnJS(setActiveTab)`
+- For 3+ tabs, compute `TAB_W = SCREEN_W / TABS.length` and iterate
+
 ---
 
 **Hover reveal card (scale up from trigger edge):**
@@ -2426,6 +2502,86 @@ const styles = StyleSheet.create({
 ```
 
 Interpolating over the last 60px of the hero (`HERO_HEIGHT - 60` → `HERO_HEIGHT`) ties the opacity + slide to scroll position — it feels physically attached to the hero leaving screen. Never use a hard blink (`pointerEvents` toggle only) — it reads as a flash.
+
+**React Native — sticky header + horizontal quote carousel:**
+
+When the sticky header should also show a one-quote-at-a-time horizontal carousel (driven by the main page's active snap section), extend the pattern above with a `FlatList` ref inside the header:
+
+```tsx
+import { FlatList } from 'react-native'
+import { useRef, useCallback } from 'react'
+
+function BookScreen({ book, quotes }: { book: Book; quotes: Quote[] }) {
+  const scrollY        = useSharedValue(0)
+  const scrollHandler  = useAnimatedScrollHandler({ onScroll: (e) => { scrollY.value = e.contentOffset.y } })
+  const headerCarousel = useRef<FlatList>(null)
+  const [activeQuote, setActiveQuote] = useState(0)
+
+  const stickyStyle = useAnimatedStyle(() => ({
+    opacity:   interpolate(scrollY.value, [HERO_HEIGHT - 60, HERO_HEIGHT], [0, 1], Extrapolation.CLAMP),
+    transform: [{ translateY: interpolate(scrollY.value, [HERO_HEIGHT - 60, HERO_HEIGHT], [-8, 0], Extrapolation.CLAMP) }],
+  }))
+
+  // When the main scroll advances to a new quote section, sync the header carousel
+  const handleViewableChange = useCallback(({ viewableItems }: { viewableItems: ViewToken[] }) => {
+    if (!viewableItems[0]) return
+    const index = viewableItems[0].index ?? 0
+    setActiveQuote(index)
+    headerCarousel.current?.scrollToIndex({ index, animated: true })
+  }, [])
+
+  return (
+    <>
+      <Animated.View style={[styles.stickyHeader, stickyStyle]} pointerEvents="box-none">
+        <Text numberOfLines={1} style={styles.stickyTitle}>{book.title}</Text>
+        {/* One-quote-at-a-time carousel in the header */}
+        <FlatList
+          ref={headerCarousel}
+          data={quotes}
+          keyExtractor={(q) => q.id}
+          horizontal
+          pagingEnabled
+          scrollEnabled={false}   // driven programmatically, not by user swipe
+          showsHorizontalScrollIndicator={false}
+          style={{ flex: 1 }}
+          renderItem={({ item }) => (
+            <View style={{ width: CAROUSEL_W, paddingHorizontal: 8 }}>
+              <Text numberOfLines={1} style={styles.stickyQuote}>{item.text}</Text>
+            </View>
+          )}
+        />
+      </Animated.View>
+
+      <Animated.ScrollView
+        onScroll={scrollHandler}
+        scrollEventThrottle={16}
+        onViewableItemsChanged={handleViewableChange}
+        viewabilityConfig={{ itemVisiblePercentThreshold: 70 }}
+      >
+        <View style={{ height: HERO_HEIGHT }}>{/* book cover / hero */}</View>
+        {quotes.map((q) => <QuoteSection key={q.id} quote={q} />)}
+      </Animated.ScrollView>
+    </>
+  )
+}
+
+const CAROUSEL_W = SCREEN_W - 120  // leave room for book title + padding
+const styles = StyleSheet.create({
+  stickyHeader: {
+    position: 'absolute', top: 0, left: 0, right: 0, zIndex: 50,
+    height: 56, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center',
+    gap: 8, backgroundColor: 'rgba(10, 10, 10, 0.95)',
+  },
+  stickyTitle:  { fontSize: 11, color: '#71717a', fontFamily: 'JetBrainsMono', flexShrink: 0, maxWidth: 96 },
+  stickyQuote:  { fontSize: 12, color: '#e4e4e7', fontFamily: 'JetBrainsMono' },
+})
+```
+
+Key rules:
+- `scrollEnabled={false}` on the header carousel — it's driven by `scrollToIndex`, not user swipe. Letting the user swipe it independently creates a confusing desync.
+- `onViewableItemsChanged` + `viewabilityConfig` is the correct way to track which quote section is visible in the main scroll. `scrollEventThrottle` alone doesn't give you item indices.
+- `scrollToIndex` requires that the item is already rendered — wrap in a `try/catch` or use `scrollToOffset` if the carousel hasn't rendered yet.
+- The `CAROUSEL_W` should account for the book title width so quote text doesn't clip behind it.
 
 ---
 
