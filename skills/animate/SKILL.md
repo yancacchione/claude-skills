@@ -479,6 +479,84 @@ await animate(scope.current, { x: 100 }, { duration: 0.3 })
 await animate(scope.current, { rotate: 360 })
 ```
 
+**`useScroll` + `useTransform` — scroll-linked values in React (web):**
+
+The primary Framer Motion pattern for scroll-driven animations. Two flavors: page scroll (window) and element scroll (element entering/leaving viewport).
+
+```tsx
+import { useScroll, useTransform, motion } from 'framer-motion'
+import { useRef } from 'react'
+
+// 1. Page-level (window scroll) — hero fades/slides as you scroll down
+function Hero() {
+  const { scrollY } = useScroll()
+  const opacity = useTransform(scrollY, [0, 300], [1, 0])
+  const y       = useTransform(scrollY, [0, 300], [0, -40])
+
+  return <motion.section style={{ opacity, y }}>{/* … */}</motion.section>
+}
+
+// 2. Element-relative — value tracks where the element sits in the viewport
+function ParallaxCard() {
+  const ref = useRef<HTMLDivElement>(null)
+  const { scrollYProgress } = useScroll({
+    target: ref,
+    // [when tracking starts, when tracking ends] — here: bottom enters viewport → top leaves
+    offset: ['start end', 'end start'],
+  })
+  // scrollYProgress is 0 when bottom enters viewport, 1 when top leaves
+  const scale   = useTransform(scrollYProgress, [0, 0.5, 1], [0.9, 1, 0.9])
+  const opacity = useTransform(scrollYProgress, [0, 0.2, 0.8, 1], [0, 1, 1, 0])
+
+  return <motion.div ref={ref} style={{ scale, opacity }}>{/* … */}</motion.div>
+}
+
+// 3. Smooth scroll velocity (spring the output for a trailing/elastic feel)
+import { useSpring } from 'framer-motion'
+
+const { scrollYProgress } = useScroll({ target: ref, offset: ['start end', 'end start'] })
+const smoothProgress = useSpring(scrollYProgress, { stiffness: 100, damping: 30, restDelta: 0.001 })
+const y = useTransform(smoothProgress, [0, 1], ['-10%', '10%']) // parallax layer
+```
+
+`useTransform` multi-stop (same as CSS `@keyframes`):
+```tsx
+const scale = useTransform(scrollYProgress, [0, 0.3, 0.7, 1], [0.8, 1, 1, 0.8])
+// Input must be monotonically increasing. Output can go up or down freely.
+```
+
+`offset` values — a pair of strings `[whenToStart, whenToEnd]`:
+- `'start start'` — element top reaches viewport top
+- `'start end'` — element top reaches viewport bottom (element bottom-edge entering)
+- `'end start'` — element bottom reaches viewport top (element fully gone)
+- `'end end'` — element bottom reaches viewport bottom
+
+When to use `useScroll` vs GSAP ScrollTrigger:
+- `useScroll` — React-native, no extra dep, composable with other motion hooks. Preferred in Next.js App Router.
+- GSAP ScrollTrigger — richer controls (scrub, pin, snap, markers), better for pinned sections and complex multi-element timelines.
+
+**`AnimatePresence` `mode` — pick the right one:**
+
+```tsx
+// sync (default) — enter and exit run at the same time; layout may shift
+<AnimatePresence>...</AnimatePresence>
+
+// wait — exit completes before enter starts; no overlap, no layout shift
+<AnimatePresence mode="wait">...</AnimatePresence>
+
+// popLayout — exiting element is immediately removed from layout flow (display:none-like)
+// so the entering element pops into its final position without pushing things around
+<AnimatePresence mode="popLayout">...</AnimatePresence>
+```
+
+| `mode` | Use when |
+|--------|---------|
+| `sync` (default) | elements don't overlap and layout doesn't shift |
+| `wait` | one element must fully exit before the next enters (e.g. tab content swap, route change) |
+| `popLayout` | rapidly-cycling counters, badges, notification numbers — exit leaves layout immediately so enter pops clean |
+
+Countdown timers, scores, and live-updating numbers should use `mode="popLayout"`. Text or content that needs a clean handoff uses `mode="wait"`.
+
 ### GSAP (complex web timelines)
 
 ```js
@@ -901,6 +979,67 @@ Rules:
 - `useAnimatedStyle` = map animated values → style object. Can read `useDerivedValue` results directly.
 - `useAnimatedReaction` = side effects when a value crosses a threshold (haptics, `runOnJS`).
 - Never call `useDerivedValue` just to trigger a JS effect — that produces silent worklet errors.
+
+**`useAnimatedProps` — animate non-style props (SVG attributes, third-party component props):**
+
+`useAnimatedStyle` handles CSS-like View styles. `useAnimatedProps` handles everything else — SVG attributes, `BlurView` intensity, `TextInput` value, video `currentTime`, any prop that isn't a style.
+
+```tsx
+import Animated, { useAnimatedProps, useSharedValue, withTiming, Easing } from 'react-native-reanimated'
+import Svg, { Circle } from 'react-native-svg'
+
+const AnimatedCircle = Animated.createAnimatedComponent(Circle)
+
+// SVG progress ring — strokeDashoffset is not a style prop, needs useAnimatedProps
+function ProgressRing({ progress }: { progress: SharedValue<number> }) {
+  const RADIUS = 40
+  const CIRCUMFERENCE = 2 * Math.PI * RADIUS
+
+  const animatedProps = useAnimatedProps(() => ({
+    strokeDashoffset: CIRCUMFERENCE * (1 - progress.value),
+  }))
+
+  return (
+    <Svg width={100} height={100} viewBox="0 0 100 100">
+      {/* Track ring */}
+      <Circle cx="50" cy="50" r={RADIUS} stroke="#27272a" strokeWidth={4} fill="none" />
+      {/* Progress arc — driven by animatedProps */}
+      <AnimatedCircle
+        cx="50" cy="50" r={RADIUS}
+        stroke="#a1a1aa" strokeWidth={4} fill="none"
+        strokeDasharray={CIRCUMFERENCE}
+        strokeLinecap="round"
+        animatedProps={animatedProps}
+        transform="rotate(-90, 50, 50)"  // start from top
+      />
+    </Svg>
+  )
+}
+
+// Drive it: progress.value goes 0 → 1
+const progressVal = useSharedValue(0)
+useEffect(() => {
+  progressVal.value = withTiming(0.72, { duration: 1200, easing: Easing.out(Easing.cubic) })
+}, [])
+// <ProgressRing progress={progressVal} />
+```
+
+Other `useAnimatedProps` uses:
+```tsx
+// expo-blur — intensity is a prop, not a style
+import { BlurView } from 'expo-blur'
+const AnimatedBlur = Animated.createAnimatedComponent(BlurView)
+const blurProps = useAnimatedProps(() => ({
+  intensity: interpolate(scrollY.value, [0, 80], [0, 60], Extrapolation.CLAMP),
+}))
+// <AnimatedBlur animatedProps={blurProps} tint="dark" style={StyleSheet.absoluteFill} />
+
+// MapView bearing / camera — props, not styles
+// Video currentTime scrubbing
+// Lottie progress — animatedProps on LottieView.progress
+```
+
+Rule: if the prop you want to animate isn't in the `style` object, use `useAnimatedProps`. Always pair it with `Animated.createAnimatedComponent(YourComponent)` unless the component already exports an `Animated.*` variant.
 
 **`useAnimatedRef` + `measure` — get rendered position on the UI thread:**
 
