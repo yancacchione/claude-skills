@@ -1416,6 +1416,121 @@ Rules:
 - `layout={LinearTransition.springify()}` smoothly shifts existing items when items are added or removed
 - For 100+ item lists, prefer `@shopify/flash-list` — drop-in replacement with better virtualization; wrap with `Animated.createAnimatedComponent(FlashList)` to keep entering/layout support
 
+**Gradient fade mask — indicate scrollable content without a hard edge (React Native):**
+
+A bottom-edge LinearGradient overlay that fades the list content into the background. The hard cutoff of a list edge looks accidental in a minimal/calm app; a fade edge reads as intentional design.
+
+```tsx
+import { StyleSheet, View } from 'react-native'
+import { LinearGradient } from 'expo-linear-gradient'
+
+// Wrap any FlatList or ScrollView to add a fading bottom edge
+function FadedList({ children, bgColor = '#0a0a0a' }: { children: React.ReactNode; bgColor?: string }) {
+  return (
+    <View style={{ flex: 1 }}>
+      {children}
+      <LinearGradient
+        colors={['transparent', bgColor]}
+        style={styles.fadeOverlay}
+        pointerEvents="none"
+      />
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  fadeOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    top: undefined,   // stick to bottom only
+    height: 72,
+  },
+})
+// bgColor must match the list's background — transparent-to-opaque only looks right on a solid bg
+// For a top-edge fade: set bottom: undefined and height: 48, reverse colors to [bgColor, 'transparent']
+// Both edges: two overlays, one at top and one at bottom
+// For web: use a CSS mask instead — mask-image: linear-gradient(to bottom, black 70%, transparent 100%)
+```
+
+**Breathing empty state — invitation, not error (React Native / React):**
+
+For contemplative apps (question libraries, quote apps, journals) where the empty state is a design moment: a slow, autonomous opacity pulse that feels alive without demanding attention. Contrast with task-app empty states that pop or bounce — those signal "fix this." A breathing empty state signals "come back when you're ready."
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedStyle,
+  withRepeat, withTiming, cancelAnimation, Easing,
+} from 'react-native-reanimated'
+import { useFocusEffect } from 'expo-router'
+import { useCallback } from 'react'
+import { StyleSheet } from 'react-native'
+
+function BreathingEmptyState({ message = 'nothing here yet.' }: { message?: string }) {
+  const opacity = useSharedValue(0.3)
+
+  useFocusEffect(
+    useCallback(() => {
+      opacity.value = withRepeat(
+        withTiming(0.7, { duration: 2800, easing: Easing.inOut(Easing.sin) }),
+        -1,
+        true   // ping-pong — breathes in and out continuously
+      )
+      return () => {
+        cancelAnimation(opacity)
+        opacity.value = 0.3   // reset to dim on blur
+      }
+    }, [])
+  )
+
+  const style = useAnimatedStyle(() => ({ opacity: opacity.value }))
+
+  return (
+    <Animated.Text style={[styles.text, style]}>
+      {message}
+    </Animated.Text>
+  )
+}
+
+const styles = StyleSheet.create({
+  text: {
+    fontFamily: 'JetBrainsMono',
+    fontSize: 14,
+    color: '#71717a',
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+})
+// Duration rule: 2400–3200ms per half-cycle. Below 1500ms = anxious. Above 4000ms = imperceptible.
+// Never use withSpring — springs respond to physical input; breathing is ambient, autonomous.
+// Easing.inOut(Easing.sin) produces a smooth biological sine-wave rhythm.
+```
+
+```tsx
+// React / Next.js (Framer Motion)
+import { motion } from 'framer-motion'
+import { useReducedMotion } from 'framer-motion'
+
+function BreathingEmptyState({ message = 'nothing here yet.' }: { message?: string }) {
+  const prefersReduced = useReducedMotion()
+  return (
+    <motion.p
+      className="text-sm text-zinc-500 font-mono text-center leading-relaxed"
+      animate={prefersReduced ? { opacity: 0.5 } : { opacity: [0.3, 0.7, 0.3] }}
+      transition={{ duration: 5.6, ease: 'easeInOut', repeat: Infinity }}
+    >
+      {message}
+    </motion.p>
+  )
+}
+// Total cycle = 5.6s (2.8s in + 2.8s out). Keyframes [0.3, 0.7, 0.3] animate as a continuous loop.
+```
+
+Calm empty state rules:
+- **Never** add a bouncing icon or popping illustration — it shatters the contemplative mood
+- The text IS the empty state; no graphic needed in a typography-led app
+- Opacity range **0.3–0.7**: perceptibly alive, not demanding attention
+- If there's a CTA (e.g. "Add your first question"), keep the button static — only the ambient message breathes
+- Pair with `text-wrap: balance` so the text never orphans a word on its own line
+
 **`Gesture.Tap` + `Gesture.LongPress` — interactive press and hold:**
 
 `Gesture.Pan()` is for drag. For tap feedback and hold gestures, use `Gesture.Tap()` and `Gesture.LongPress()`:
@@ -1894,6 +2009,8 @@ function FeedbackEffect() {
 | Hover reveal card | CSS `position:absolute` + `transform` | scale + opacity, set `transform-origin` to edge nearest trigger |
 | Simulated async progress | Framer Motion `useMotionValue` / Reanimated `withTiming` | asymptote to 95%, snap to 100% on complete |
 | Optimistic UI state | Framer Motion `AnimatePresence` + local state | animate instantly, rollback in catch |
+| Breathing empty state | Reanimated `withRepeat` + `Easing.inOut(Easing.sin)` | 0.3–0.7 opacity ping-pong, 2800ms/cycle; invitation feel, not error |
+| List gradient fade | `expo-linear-gradient` LinearGradient overlay | 72px height, `pointerEvents="none"`, bg-color match required |
 
 **Number count-up — animate a displayed number from 0 to target:**
 
