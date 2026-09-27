@@ -654,6 +654,38 @@ function StickyHeader() {
 // - useScrollViewOffset: simpler, for read-only scroll position → derived styles
 // - useAnimatedScrollHandler: use when you need onBeginDrag, onEndDrag, onMomentumEnd events
 
+// `scrollTo` — programmatic scroll on the UI thread (no JS bridge round-trip)
+import { useAnimatedRef, scrollTo, useSharedValue, useAnimatedStyle } from 'react-native-reanimated'
+
+function QuoteList({ jumpToIndex }: { jumpToIndex: number }) {
+  const scrollRef = useAnimatedRef<Animated.ScrollView>()
+
+  // Trigger scroll from JS side by writing to a shared value
+  const targetIndex = useSharedValue(0)
+
+  useAnimatedReaction(
+    () => targetIndex.value,
+    (index) => {
+      'worklet'
+      scrollTo(scrollRef, 0, index * ITEM_HEIGHT, true) // (ref, x, y, animated)
+    }
+  )
+
+  // Or trigger directly from a gesture/tap via runOnUI:
+  const scrollToItem = (index: number) => {
+    runOnUI(() => {
+      'worklet'
+      scrollTo(scrollRef, 0, index * ITEM_HEIGHT, true)
+    })()
+  }
+
+  return <Animated.ScrollView ref={scrollRef}>{/* items */}</Animated.ScrollView>
+}
+// scrollTo runs on the UI thread — no JS → native round-trip, no dropped frames.
+// The animated flag uses the native scroll animation; pass false for instant jump.
+// For FlatList, use Animated.createAnimatedComponent(FlatList) and the same ref pattern,
+// or prefer FlatList.scrollToIndex() for index-based jumps (it handles item height estimation).
+
 // Layout animation (list reorder, add/remove items)
 <Animated.View layout={LinearTransition.springify().damping(20)}>
 
@@ -871,6 +903,32 @@ translateY.value = withSpring(targetValue, {
 | Spring chews CPU on a long tail | Raise `restSpeedThreshold` — declares done sooner, no visible difference |
 
 Defaults: `restDisplacementThreshold: 0.001`, `restSpeedThreshold: 2`. The displacement threshold is already very tight; the speed threshold is the one to tune in practice.
+
+**`withClamp` — hard-limit the range of any animated value:**
+
+Wraps any animation (`withSpring`, `withTiming`, `withDecay`) and ensures the animated value never leaves a min/max range, even if the physics would otherwise overshoot it.
+
+```tsx
+import { withClamp, withSpring, withDecay } from 'react-native-reanimated'
+
+// Prevent a spring from going below 0 or above screen height
+translateY.value = withClamp(
+  { min: 0, max: SCREEN_HEIGHT },
+  withSpring(targetY, { damping: 18 })
+)
+
+// Decay fling that stops at the edges instead of bouncing
+translateX.value = withClamp(
+  { min: -MAX_OFFSET, max: MAX_OFFSET },
+  withDecay({ velocity: gestureVelocityX })
+)
+```
+
+`withClamp` vs `Extrapolation.CLAMP` in `interpolate`:
+- `withClamp`: clamps the **animated value itself** during motion — the spring will stop at the boundary rather than overshooting it, even mid-animation.
+- `Extrapolation.CLAMP`: clamps the **output of a mapping** — the shared value can still exceed the range; only the derived style output is clamped.
+
+Use `withClamp` when the underlying position itself must stay bounded (e.g. a draggable that can't leave the screen). Use `Extrapolation.CLAMP` when you want the animation to continue but cap what gets applied visually.
 
 **`interpolate` — map a shared value to an output range (essential for scroll-driven UIs):**
 
@@ -1155,6 +1213,31 @@ import { Stack } from 'expo-router'
 // Destination screen:
 <Animated.Image source={item.img} sharedTransitionTag={`image-${item.id}`} />
 // No extra config needed — Reanimated handles the morph automatically
+
+// Custom shared transition — control the interpolation curve:
+import { SharedTransition, withSpring } from 'react-native-reanimated'
+
+const customTransition = SharedTransition.custom((values) => {
+  'worklet'
+  return {
+    width:  withSpring(values.targetWidth,  { damping: 22, stiffness: 200 }),
+    height: withSpring(values.targetHeight, { damping: 22, stiffness: 200 }),
+    originX: withSpring(values.targetOriginX, { damping: 22 }),
+    originY: withSpring(values.targetOriginY, { damping: 22 }),
+  }
+})
+
+// Apply to the element:
+<Animated.Image
+  source={item.img}
+  sharedTransitionTag={`cover-${item.id}`}
+  sharedTransitionStyle={customTransition}
+/>
+// values contains: targetWidth, targetHeight, targetOriginX, targetOriginY
+// (and current* versions of each — for building mid-transition from current state)
+// Omitting a property falls back to Reanimated's default interpolation for it.
+// For a book cover → full-screen hero morph: let width/height spring in,
+// but use withTiming for originX/Y so position resolves at a different rate than size.
 ```
 
 **`useFocusEffect` — animation that reruns every time the screen gains focus:**
