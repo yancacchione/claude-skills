@@ -2094,6 +2094,8 @@ function FeedbackEffect() {
 | Optimistic UI state | Framer Motion `AnimatePresence` + local state | animate instantly, rollback in catch |
 | Breathing empty state | Reanimated `withRepeat` + `Easing.inOut(Easing.sin)` | 0.3–0.7 opacity ping-pong, 2800ms/cycle; invitation feel, not error |
 | List gradient fade | `expo-linear-gradient` LinearGradient overlay | 72px height, `pointerEvents="none"`, bg-color match required |
+| Card swipe stack | Reanimated + RNGH Pan — rotate+translate, threshold or velocity fling | 35% width threshold, 800px/s velocity; snap back with `withSpring(0, {damping:22})` |
+| Drag-to-reorder row | LongPress (400ms) + Pan `Gesture.Simultaneous`, shift others with `withSpring` | `ITEM_HEIGHT` must be fixed; haptic on lift + drop; guard `onUpdate` with `isDragging` |
 
 **Number count-up — animate a displayed number from 0 to target:**
 
@@ -2921,6 +2923,325 @@ Key rules:
 - `onViewableItemsChanged` + `viewabilityConfig` is the correct way to track which quote section is visible in the main scroll. `scrollEventThrottle` alone doesn't give you item indices.
 - `scrollToIndex` requires that the item is already rendered — wrap in a `try/catch` or use `scrollToOffset` if the carousel hasn't rendered yet.
 - The `CAROUSEL_W` should account for the book title width so quote text doesn't clip behind it.
+
+---
+
+## Card Swipe Stack (Question Browser)
+
+Activate when: swiping through a deck of cards — a question-by-question browser, reading list, or any "advance by flicking" pattern. The card tilts as you drag (rotation proportional to translateX), snaps back on partial swipe, flies off on threshold or velocity fling.
+
+```tsx
+import { Dimensions, StyleSheet, View } from 'react-native'
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring, withTiming,
+  runOnJS, interpolate, Extrapolation,
+} from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import { useState } from 'react'
+
+const { width: SCREEN_W } = Dimensions.get('window')
+const SWIPE_THRESHOLD = SCREEN_W * 0.35  // 35% of width — decisive swipe
+const SWIPE_VELOCITY  = 800             // px/s — fling even below threshold
+
+type Direction = 'left' | 'right'
+
+function SwipeCard({
+  children,
+  onSwipe,
+}: {
+  children: React.ReactNode
+  onSwipe: (direction: Direction) => void
+}) {
+  const translateX = useSharedValue(0)
+  const translateY = useSharedValue(0)
+  const startX     = useSharedValue(0)
+  const startY     = useSharedValue(0)
+
+  const pan = Gesture.Pan()
+    .onStart(() => {
+      startX.value = translateX.value
+      startY.value = translateY.value
+    })
+    .onUpdate((e) => {
+      translateX.value = startX.value + e.translationX
+      translateY.value = startY.value + e.translationY * 0.25  // dampen vertical
+    })
+    .onEnd((e) => {
+      'worklet'
+      const isRight = translateX.value >  SWIPE_THRESHOLD || e.velocityX >  SWIPE_VELOCITY
+      const isLeft  = translateX.value < -SWIPE_THRESHOLD || e.velocityX < -SWIPE_VELOCITY
+
+      if (isRight) {
+        translateX.value = withTiming(SCREEN_W * 1.5, { duration: 280 }, (done) => {
+          if (done) runOnJS(onSwipe)('right')
+        })
+      } else if (isLeft) {
+        translateX.value = withTiming(-SCREEN_W * 1.5, { duration: 280 }, (done) => {
+          if (done) runOnJS(onSwipe)('left')
+        })
+      } else {
+        translateX.value = withSpring(0, { damping: 22, stiffness: 300 })
+        translateY.value = withSpring(0, { damping: 22, stiffness: 300 })
+      }
+    })
+
+  const cardStyle = useAnimatedStyle(() => {
+    const rotate = interpolate(
+      translateX.value,
+      [-SCREEN_W / 2, 0, SCREEN_W / 2],
+      [-12, 0, 12],
+      Extrapolation.CLAMP
+    )
+    return {
+      transform: [
+        { translateX: translateX.value },
+        { translateY: translateY.value },
+        { rotate: `${rotate}deg` },
+      ],
+    }
+  })
+
+  return (
+    <GestureDetector gesture={pan}>
+      <Animated.View style={[styles.card, cardStyle]}>
+        {children}
+      </Animated.View>
+    </GestureDetector>
+  )
+}
+
+// Deck — renders top 3 cards; back cards are scaled/offset to suggest depth
+function QuestionDeck({ questions }: { questions: Array<{ id: string }> }) {
+  const [index, setIndex] = useState(0)
+  const handleSwipe = () => setIndex(i => i + 1)
+  const visible = questions.slice(index, index + 3)
+
+  if (!visible.length) return null  // deck exhausted — render empty state
+
+  return (
+    <View style={styles.deckContainer}>
+      {[...visible].reverse().map((q, i) => {
+        const depth = visible.length - 1 - i  // 0 = active (top), 1 = behind, 2 = back
+        const isActive = depth === 0
+        const scale = 1 - depth * 0.04
+        const offsetY = depth * 8
+
+        if (!isActive) {
+          return (
+            <View
+              key={q.id}
+              style={[styles.card, {
+                transform: [{ scale }, { translateY: offsetY }],
+                zIndex: visible.length - depth,
+              }]}
+            />
+          )
+        }
+        return (
+          <SwipeCard key={q.id} onSwipe={handleSwipe}>
+            {/* question content here */}
+          </SwipeCard>
+        )
+      })}
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  deckContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  card: {
+    position: 'absolute',
+    width: SCREEN_W - 40,
+    borderRadius: 16,
+    backgroundColor: '#18181b',
+    padding: 24,
+    // shadow
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+})
+```
+
+Key rules:
+- **Capture `startX` in `onStart`** — same reason as bottom sheet: without it the card jumps to offset-from-0 on first move.
+- **Dampen vertical by 0.25** — questions are read vertically; full vertical freedom fights the reading intent.
+- **`depth * 0.04` scale + `depth * 8` offset** — subtle but clearly communicates "there are more". Bigger gaps look like a messy pile.
+- **`[...visible].reverse()`** — render back cards first so the active card is last in DOM order and paints on top without an explicit `zIndex` war.
+- **Haptics**: add `runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Light)` in `.onStart` for a subtle lift feedback, and `.Medium` on the fling threshold being crossed.
+- For a **left-only** question browser (no right swipe): only check `isLeft`; snap back on any rightward motion. This is the Motamo "next question" pattern.
+
+---
+
+## Drag-to-Reorder List Items
+
+Activate when: the user can reorder items by long-pressing and dragging — question collections, playlists, ordered queues. The item lifts on long press, other items shift to make room as it hovers, and a haptic fires on lift and on drop.
+
+```tsx
+import { StyleSheet } from 'react-native'
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring, runOnJS, SharedValue,
+} from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import * as Haptics from 'expo-haptics'
+import { useState } from 'react'
+
+const ITEM_HEIGHT = 64   // fixed row height — required for position math
+
+// Reorders an array: moves item at `from` to `to`
+function reorder<T>(arr: T[], from: number, to: number): T[] {
+  const result = [...arr]
+  const [item] = result.splice(from, 1)
+  result.splice(to, 0, item)
+  return result
+}
+
+// Per-item draggable row
+function DraggableRow({
+  index,
+  draggingIndex,
+  hoverIndex,
+  onDragStart,
+  onDragEnd,
+  children,
+}: {
+  index: number
+  draggingIndex: SharedValue<number>
+  hoverIndex: SharedValue<number>
+  onDragStart: (index: number) => void
+  onDragEnd: (from: number, to: number) => void
+  children: React.ReactNode
+}) {
+  const offsetY    = useSharedValue(0)
+  const isDragging = useSharedValue(false)
+
+  const longPress = Gesture.LongPress()
+    .minDuration(400)
+    .onStart(() => {
+      'worklet'
+      isDragging.value = true
+      draggingIndex.value = index
+      runOnJS(onDragStart)(index)
+      runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Medium)
+    })
+
+  const pan = Gesture.Pan()
+    .onUpdate((e) => {
+      'worklet'
+      if (!isDragging.value) return
+      offsetY.value = e.translationY
+      // Compute which slot the center of the dragged item is over
+      const centerY = index * ITEM_HEIGHT + ITEM_HEIGHT / 2 + e.translationY
+      hoverIndex.value = Math.round(centerY / ITEM_HEIGHT - 0.5)
+    })
+    .onEnd(() => {
+      'worklet'
+      if (!isDragging.value) return
+      const from = draggingIndex.value
+      const to   = Math.max(0, hoverIndex.value)
+      isDragging.value = false
+      draggingIndex.value = -1
+      hoverIndex.value = -1
+      offsetY.value = withSpring(0, { damping: 20 })
+      runOnJS(onDragEnd)(from, to)
+      runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Light)
+    })
+
+  const gesture = Gesture.Simultaneous(longPress, pan)
+
+  const rowStyle = useAnimatedStyle(() => {
+    const isMe = draggingIndex.value === index
+
+    if (isMe) {
+      return {
+        transform: [{ translateY: offsetY.value }, { scale: 1.04 }],
+        zIndex: 100,
+        shadowOpacity: 0.25,
+      }
+    }
+
+    // Compute how far to shift to make room
+    const drag  = draggingIndex.value
+    const hover = hoverIndex.value
+    let shift = 0
+    if (drag !== -1 && hover !== -1) {
+      if (drag < hover && index > drag && index <= hover) shift = -ITEM_HEIGHT
+      if (drag > hover && index < drag && index >= hover) shift = ITEM_HEIGHT
+    }
+
+    return {
+      transform: [{ translateY: withSpring(shift, { damping: 20, stiffness: 200 }), scale: 1 }],
+      zIndex: 1,
+      shadowOpacity: 0,
+    }
+  })
+
+  return (
+    <GestureDetector gesture={gesture}>
+      <Animated.View style={[styles.row, rowStyle]}>
+        {children}
+      </Animated.View>
+    </GestureDetector>
+  )
+}
+
+// Usage — mount all rows; shared values live in the parent
+function ReorderableList<T extends { id: string }>({ items: initial }: { items: T[] }) {
+  const [items, setItems]  = useState(initial)
+  const draggingIndex      = useSharedValue(-1)
+  const hoverIndex         = useSharedValue(-1)
+
+  const handleDragEnd = (from: number, to: number) => {
+    if (from !== to) setItems(prev => reorder(prev, from, to))
+  }
+
+  return (
+    <Animated.View style={{ position: 'relative' }}>
+      {items.map((item, i) => (
+        <DraggableRow
+          key={item.id}
+          index={i}
+          draggingIndex={draggingIndex}
+          hoverIndex={hoverIndex}
+          onDragStart={() => {}}
+          onDragEnd={handleDragEnd}
+        >
+          {/* row content */}
+        </DraggableRow>
+      ))}
+    </Animated.View>
+  )
+}
+
+const styles = StyleSheet.create({
+  row: {
+    height: ITEM_HEIGHT,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    backgroundColor: '#18181b',
+    borderBottomWidth: 1,
+    borderBottomColor: '#27272a',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 8,
+  },
+})
+```
+
+Key rules:
+- **`Gesture.Simultaneous(longPress, pan)`** — long press activates, pan drives. Without `Simultaneous`, the pan gesture doesn't fire during a long press.
+- **`isDragging.value` guard in `onUpdate`** — the pan gesture starts immediately, before `onStart` of `LongPress` has fired. Without the guard, the row would start moving on any drag, not just after the hold.
+- **`ITEM_HEIGHT` must be fixed** — variable heights require a different approach (measure each row on mount and store offsets). Fixed is correct for question/playlist rows.
+- **Shift math**: dragging down (`drag < hover`) → items between drag and hover shift up. Dragging up → they shift down.
+- **`withSpring` on shift** — the surrounding items spring into position as the user drags, giving the illusion of physical space opening up.
+- For a **FlatList** version, replace the parent `Animated.View` with a `FlatList` using `renderItem`. The shared values still live in the list component. Wrap `renderItem` in `useCallback` to prevent re-renders from crashing the gesture.
 
 ---
 
