@@ -3660,6 +3660,136 @@ Key rule: **sample step ≥ 10** — sampling every pixel at 640×480 is 300K it
 
 ---
 
+## Custom Font Loading & FOUT Prevention
+
+For apps that define brand fonts via `@font-face` (Denton-Light, TWK Lausanne, custom variable fonts), controlling when and how text renders during load is as important as the motion itself. Mishandled font swaps cause jarring layout shifts — especially in full-viewport designs where typography IS the layout.
+
+### `font-display` — pick one per font
+
+| Value | Behavior | Use when |
+|-------|----------|---------|
+| `swap` | System fallback immediately; custom font replaces once loaded | Most UI text — no invisible period, but FOUT may shift layout |
+| `optional` | 100ms window; custom font used only if it loads in time; otherwise fallback forever | Brand-critical display text where FOUT is unacceptable; one-shot on first load |
+| `block` | Invisible text for up to 3s, then swap | When showing the wrong fallback is worse than showing nothing |
+| `fallback` | 100ms invisible, then swap if loaded within 3s | Good middle ground — brief block prevents FOUT on fast loads |
+
+For a full-viewport quote viewer where typography IS the art: `font-display: optional` or `block` on the display font, `fallback` on UI text.
+
+### Metric-compatible fallback (`size-adjust`)
+
+Reduce layout shift when the custom font swaps in by adjusting the fallback font's metrics to match the custom font's line height and cap height:
+
+```css
+/* Match fallback metrics to prevent layout jump on swap */
+@font-face {
+  font-family: 'Denton-Light-Fallback';
+  src: local('Georgia');      /* closest system serif to Denton-Light */
+  size-adjust: 92%;           /* scale to match custom font's cap height */
+  ascent-override: 95%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}
+
+/* Use in the font stack — fallback renders at ~correct size */
+.quote-text {
+  font-family: 'Denton-Light', 'Denton-Light-Fallback', serif;
+}
+```
+
+Getting `size-adjust` right: open DevTools, load both fonts at the same size, compare cap height. Tune in 2% increments. The [screenspan.com/size-adjust](https://screenspan.com/size-adjust) tool generates the exact values from uploaded font files.
+
+### `document.fonts.ready` — reveal content after fonts load
+
+For designs where showing the wrong fallback is worse than a brief delay — fade content in only after the custom font confirms it loaded:
+
+```css
+/* app/globals.css */
+.font-dependent {
+  opacity: 0;
+  transition: opacity 350ms ease-out;
+}
+.fonts-loaded .font-dependent {
+  opacity: 1;
+}
+```
+
+```ts
+// Run early — layout.tsx inline script or a client component
+async function revealAfterFonts(timeout = 500) {
+  await Promise.race([
+    document.fonts.ready,
+    new Promise(resolve => setTimeout(resolve, timeout)), // failsafe for slow network
+  ])
+  document.documentElement.classList.add('fonts-loaded')
+}
+revealAfterFonts()
+```
+
+`document.fonts.ready` resolves once all fonts in the CSS have loaded (or failed). Typically 100–400ms on a fast connection. The timeout failsafe ensures content never stays hidden indefinitely on slow connections.
+
+### Next.js `next/font` — the correct pattern for Next.js 13+ apps
+
+Don't use raw `@font-face` in Next.js 13+ — use `next/font`. It self-hosts the font, inlines the `@font-face` rule into `<head>` with `font-display: optional` by default, generates a CSS variable, and adds `<link rel="preload">` automatically.
+
+```tsx
+// app/fonts.ts
+import localFont from 'next/font/local'
+import { JetBrains_Mono } from 'next/font/google'
+
+export const dentonLight = localFont({
+  src: './fonts/Denton-Light.woff2',   // file lives in app/fonts/ (not public/)
+  variable: '--font-denton',
+  display: 'swap',  // or 'optional' if FOUT is unacceptable for this design
+  preload: true,
+  weight: '300',
+})
+
+export const twkLausanne = localFont({
+  src: './fonts/TWKLausanne-300.woff2',
+  variable: '--font-lausanne',
+  display: 'swap',
+  preload: true,
+  weight: '300',
+})
+
+export const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin'],
+  variable: '--font-mono',
+  display: 'swap',
+  weight: ['400', '700'],
+})
+
+// app/layout.tsx
+import { dentonLight, twkLausanne, jetbrainsMono } from './fonts'
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="en" className={`${dentonLight.variable} ${twkLausanne.variable} ${jetbrainsMono.variable}`}>
+      <body>{children}</body>
+    </html>
+  )
+}
+
+// tailwind.config.ts — consume the CSS variables
+// theme.extend.fontFamily:
+// denton: ['var(--font-denton)', 'Georgia', 'serif'],
+// lausanne: ['var(--font-lausanne)', 'system-ui', 'sans-serif'],
+// mono: ['var(--font-mono)', 'monospace'],
+
+// Usage in JSX:
+// <p className="font-denton text-[28px] font-light">…quote text…</p>
+// <cite className="font-lausanne text-sm text-neutral-400">— Author</cite>
+```
+
+Rules:
+- Put font files in `app/fonts/` (not `public/fonts/`) — `next/font/local` resolves relative to the file, and keeping them in `app/` prevents direct URL access.
+- `display: 'optional'` prevents FOUT entirely but slow-network users see the fallback permanently. Right for brand-critical display text.
+- `display: 'swap'` shows fallback immediately, swaps on load. Right for body copy and UI text.
+- `preload: true` (the default for `next/font`) adds `<link rel="preload">` so the font starts loading before CSS is parsed — eliminates most FOUT on first load.
+- Variable fonts: pass `weight: '100 800'` and `src` pointing to the `[wght].woff2` file; `next/font/local` handles the `font-weight: 100 800` range declaration.
+
+---
+
 ## Performance Checklist (always verify)
 
 - [ ] Only `transform` + `opacity` being animated (not layout properties)
