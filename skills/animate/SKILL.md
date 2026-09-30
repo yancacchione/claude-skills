@@ -412,6 +412,38 @@ When to use vs. `pretty`:
 - `text-wrap: pretty` — avoids widows (lone last words). Best for body paragraphs. Chrome 117+.
 - `text-wrap: nowrap` — no wrapping. For single-line labels, tags, badges.
 
+**CSS scroll-snap — full-viewport one-item-per-screen (quote viewer, gallery, onboarding):**
+
+```css
+/* Container */
+.snap-container {
+  height: 100dvh;                  /* dvh = dynamic viewport height — handles mobile browser chrome */
+  overflow-y: scroll;
+  scroll-snap-type: y mandatory;   /* mandatory: always snaps. Use 'proximity' for shorter items */
+}
+
+/* Each section */
+.snap-item {
+  height: 100dvh;
+  scroll-snap-align: start;        /* 'center' for items shorter than the viewport */
+  scroll-snap-stop: always;        /* prevents fast-fling from skipping items */
+}
+```
+
+| `scroll-snap-type` value | Behavior |
+|--------------------------|----------|
+| `y mandatory` | Always snaps — correct for full-height quote viewers, onboarding |
+| `y proximity` | Only snaps when near a boundary — better for mixed-height feeds |
+| `x mandatory` | Horizontal swipe carousel |
+
+`scroll-snap-stop: always` — without it, a fast swipe skips multiple items. Add it to every snap item when each view is meant to be seen.
+
+`100dvh` vs `100vh`: always use `dvh` in mobile contexts — `vh` includes the browser's retractable toolbar, causing the bottom of the last item to be hidden. `dvh` measures the viewport without it.
+
+**Framer Motion + scroll-snap**: `useScroll` with `offset: ['start start', 'end end']` tracks progress *within* a snapped section — use for per-section enter animations. Don't mix GSAP ScrollTrigger `pin` with CSS scroll-snap — they conflict.
+
+**Next.js App Router** — wrap the snap container in a client component if you read `scrollY` from it; the container element itself can be server-rendered.
+
 ### Next.js App Router — animation constraints
 
 Every Framer Motion, Reanimated, or motion-hook call requires a client component. In Next.js App Router:
@@ -2096,6 +2128,152 @@ function FeedbackEffect() {
 | List gradient fade | `expo-linear-gradient` LinearGradient overlay | 72px height, `pointerEvents="none"`, bg-color match required |
 | Card swipe stack | Reanimated + RNGH Pan — rotate+translate, threshold or velocity fling | 35% width threshold, 800px/s velocity; snap back with `withSpring(0, {damping:22})` |
 | Drag-to-reorder row | LongPress (400ms) + Pan `Gesture.Simultaneous`, shift others with `withSpring` | `ITEM_HEIGHT` must be fixed; haptic on lift + drop; guard `onUpdate` with `isDragging` |
+
+**IntersectionObserver sticky header — appears once user scrolls past a section:**
+
+The pattern for a sticky header that fades in only after a specific element (e.g. a book cover, a hero) has left the viewport:
+
+```tsx
+// React / Next.js
+'use client'
+import { useEffect, useRef, useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+
+function useScrolledPast(offsetPx = 0) {
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  const [passed, setPassed] = useState(false)
+
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+    const observer = new IntersectionObserver(
+      ([entry]) => setPassed(!entry.isIntersecting),
+      { rootMargin: `${-offsetPx}px 0px 0px 0px` }
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [offsetPx])
+
+  return { sentinelRef, passed }
+}
+
+// Usage: place a zero-height sentinel right after the watched element
+function BookPage({ book, quotes }: { book: Book; quotes: Quote[] }) {
+  const { sentinelRef, passed } = useScrolledPast()
+
+  return (
+    <>
+      <AnimatePresence>
+        {passed && (
+          <motion.header
+            key="sticky-header"
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
+            className="fixed top-0 inset-x-0 z-50 bg-zinc-950/90 backdrop-blur-sm px-6 py-3 border-b border-white/5"
+          >
+            <p className="font-mono text-sm text-zinc-200 truncate">{book.title}</p>
+          </motion.header>
+        )}
+      </AnimatePresence>
+
+      {/* Hero / book cover section */}
+      <section className="min-h-screen flex items-center justify-center">
+        {/* book cover */}
+      </section>
+
+      {/* Sentinel — zero-height, placed right after the watched section */}
+      <div ref={sentinelRef} aria-hidden="true" />
+
+      {/* Quotes list */}
+    </>
+  )
+}
+```
+
+Rules:
+- Place the sentinel **after** the section you're watching, not on the hero element itself (attaching the observer to the hero fires mid-scroll while it's half-visible).
+- `rootMargin: -Npx 0px 0px 0px` adds N pixels of buffer — prevents the header from flickering on tiny upward micro-scrolls.
+- `IntersectionObserver` runs off the main thread scroll listener — no `requestAnimationFrame` needed, no jank.
+- For React Native, use `useScrollViewOffset` + `interpolate` instead (see scroll section above) — no equivalent to IntersectionObserver in RN.
+
+**Hover / tap reveal card — scale expand anchored to its trigger (author / book citation):**
+
+For inline citation elements that reveal a larger card on hover (web) or tap (mobile) without shifting layout:
+
+```tsx
+// React — the card is absolutely positioned so it never shifts layout
+'use client'
+import { useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+
+function CitationReveal({ author, bio, photoUrl }: { author: string; bio: string; photoUrl?: string }) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <span
+      className="relative inline-block"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onFocus={() => setOpen(true)}
+      onBlur={() => setOpen(false)}
+    >
+      {/* The trigger — underlined citation */}
+      <span className="cursor-default underline decoration-white/20 underline-offset-4 text-zinc-400 text-sm">
+        {author}
+      </span>
+
+      {/* The card — absolutely positioned, never shifts layout */}
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            key="card"
+            role="tooltip"
+            initial={{ opacity: 0, scale: 0.92, y: 6 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.92, y: 6 }}
+            transition={{ duration: 0.18, ease: 'easeOut' }}
+            // transform-origin: bottom center — card opens upward from the trigger
+            style={{ transformOrigin: 'bottom center' }}
+            className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50
+                       w-64 p-4 rounded-lg bg-zinc-900 border border-white/8
+                       shadow-xl shadow-black/50 pointer-events-none"
+          >
+            {photoUrl && (
+              <img src={photoUrl} alt={author}
+                className="w-12 h-12 rounded-full object-cover mb-3 grayscale" />
+            )}
+            <p className="font-mono text-xs text-zinc-200 font-medium mb-1">{author}</p>
+            <p className="text-xs text-zinc-400 leading-relaxed line-clamp-4">{bio}</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </span>
+  )
+}
+```
+
+Card positioning variants:
+```tsx
+// Above the trigger (default — avoids covering adjacent quote text)
+style={{ transformOrigin: 'bottom center' }}
+className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2"
+
+// Below the trigger (when at the top of the viewport)
+style={{ transformOrigin: 'top center' }}
+className="absolute top-full left-1/2 -translate-x-1/2 mt-2"
+
+// Right-aligned (when near left edge)
+className="absolute bottom-full right-0 mb-2"
+```
+
+Rules:
+- `pointer-events: none` on the card — no hover state on the tooltip itself, cursor doesn't accidentally dismiss it while moving from trigger to card.
+- `transform-origin` must match where the card opens from — `bottom center` for upward-opening cards so the scale feels anchored to the trigger.
+- Never scale from `0` — use `0.92` minimum. Zero scale looks mechanical and snaps uncomfortably at open.
+- On mobile, replace `onMouseEnter/Leave` with `onTouchStart` + a tap-to-toggle that closes on outside tap (use a `useEffect` document `touchstart` listener).
+- For cursor: `cursor: default` (arrow) is correct when the trigger is informational (not a link). Use `cursor: pointer` only if the card contains a clickable action.
 
 **Number count-up — animate a displayed number from 0 to target:**
 
