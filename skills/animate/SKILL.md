@@ -481,6 +481,83 @@ export default function RootLayout({ children }) {
 
 ---
 
+### View Transitions API (web — zero-JS cross-route morphs)
+
+The native browser API for animating between page states. In Next.js 15.1+, it's the right tool for route changes and shared-element morphs — no JS animation library needed. The browser snapshots the old and new state, then cross-fades them (or runs any CSS animation you specify).
+
+**Enable in Next.js 15:**
+
+```tsx
+// next.config.ts
+const config: NextConfig = { experimental: { viewTransition: true } }
+```
+
+```tsx
+// next/link with viewTransition prop (Next.js 15.1+)
+import Link from 'next/link'
+<Link href="/books/123" viewTransition>Book title</Link>
+
+// Or trigger programmatically:
+import { useRouter } from 'next/navigation'
+const router = useRouter()
+const navigate = (href: string) => {
+  if (!document.startViewTransition) { router.push(href); return }
+  document.startViewTransition(() => router.push(href))
+}
+```
+
+**Default behavior:** cross-fade between old and new page. Override with CSS:
+
+```css
+/* Slide in from right, slide old out to left */
+@keyframes slide-in-right { from { transform: translateX(100%) } }
+@keyframes slide-out-left  { to   { transform: translateX(-30%) } }
+
+::view-transition-old(root) { animation: 300ms ease-in  both slide-out-left; }
+::view-transition-new(root) { animation: 300ms ease-out both slide-in-right; }
+```
+
+**Named transitions — shared element morph:**
+
+Give matching elements the same `view-transition-name` on both source and destination. The browser morphs position, size, and shape between them automatically.
+
+```tsx
+// Source page (e.g. book list card)
+<img src={book.coverUrl} style={{ viewTransitionName: `book-cover-${book.id}` }} />
+<h2 style={{ viewTransitionName: `book-title-${book.id}` }}>{book.title}</h2>
+
+// Destination page (e.g. book detail) — same names, different size/position
+<img src={book.coverUrl} style={{ viewTransitionName: `book-cover-${book.id}` }} />
+<h1 style={{ viewTransitionName: `book-title-${book.id}` }}>{book.title}</h1>
+```
+
+The browser takes a screenshot of each named element's old bounds and new bounds, then interpolates between them — the cover smoothly grows from its card size to its hero size. No JS needed for the position/size animation.
+
+```css
+/* Optional: customize the cross-fade timing on the morph */
+::view-transition-old(book-cover-123) { animation-duration: 250ms; animation-timing-function: ease-in; }
+::view-transition-new(book-cover-123) { animation-duration: 350ms; animation-timing-function: ease-out; }
+```
+
+**Rules:**
+- `view-transition-name` must be unique per page — two elements sharing a name on the same page is undefined behavior.
+- Dynamic names in React: use inline style `viewTransitionName: \`book-${id}\`` directly — string template literals in style props work fine.
+- Named transitions only morph when the same name appears on BOTH pages. If only one side has it, that element cross-fades independently of the root transition.
+- `position: fixed` elements (sticky headers, overlays): give them a `view-transition-name` (e.g. `nav`) to exclude them from the root page cross-fade. Without it, they flash/ghost as part of the root snapshot.
+- `@media (prefers-reduced-motion: reduce)` disables view transitions in supporting browsers automatically — no extra code needed.
+- Does not work in Firefox without the flag as of late 2026; always provide a fallback: `if (!document.startViewTransition) router.push(href)`.
+
+**View Transitions vs AnimatePresence:**
+
+| Use View Transitions | Use AnimatePresence |
+|---------------------|---------------------|
+| Route change (page → page) | Component mount/unmount within a page |
+| Shared-element morph between routes | Exit animation of a modal/sheet/popover |
+| Hero image expansion across routes | Complex sequenced show/hide |
+| Zero-dep page slide / cross-fade | React-tree-managed visibility |
+
+---
+
 ### Framer Motion (React)
 
 ```tsx
