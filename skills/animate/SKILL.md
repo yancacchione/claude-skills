@@ -644,6 +644,107 @@ When to use `useScroll` vs GSAP ScrollTrigger:
 - `useScroll` — React-native, no extra dep, composable with other motion hooks. Preferred in Next.js App Router.
 - GSAP ScrollTrigger — richer controls (scrub, pin, snap, markers), better for pinned sections and complex multi-element timelines.
 
+**`useMotionTemplate` — cursor-tracking glow/spotlight (phosphor aesthetic):**
+
+Builds a CSS string from motion values. The key primitive for spotlight effects, glow halos, and gradient-follows-cursor — all without re-rendering on every mouse move.
+
+```tsx
+import { useMotionValue, useMotionTemplate, motion } from 'framer-motion'
+
+// Spotlight card — radial glow follows cursor inside the card
+function SpotlightCard({ children }: { children: React.ReactNode }) {
+  const mouseX = useMotionValue(0)
+  const mouseY = useMotionValue(0)
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const { left, top } = e.currentTarget.getBoundingClientRect()
+    mouseX.set(e.clientX - left)
+    mouseY.set(e.clientY - top)
+  }
+
+  // Builds: "radial-gradient(300px circle at Xpx Ypx, ...)"
+  // Re-evaluates on every motion value change, not on React render
+  const spotlight = useMotionTemplate`radial-gradient(300px circle at ${mouseX}px ${mouseY}px, rgba(255,255,255,0.07), transparent 80%)`
+  const border    = useMotionTemplate`radial-gradient(200px circle at ${mouseX}px ${mouseY}px, rgba(255,255,255,0.18), transparent 70%)`
+
+  return (
+    <div className="relative" onMouseMove={handleMouseMove}>
+      {/* Border glow — sits under the card */}
+      <motion.div
+        className="absolute inset-0 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity"
+        style={{ background: border, padding: '1px' }}
+      />
+      {/* Spotlight overlay — multiply over dark card */}
+      <motion.div
+        className="absolute inset-0 rounded-xl pointer-events-none"
+        style={{ background: spotlight }}
+      />
+      <div className="relative z-10">{children}</div>
+    </div>
+  )
+}
+```
+
+**Neon glow that reacts to mouse position** — driven by distance from center:
+
+```tsx
+import { useMotionValue, useTransform, useMotionTemplate, motion } from 'framer-motion'
+
+function NeonButton({ children }: { children: React.ReactNode }) {
+  const mouseX = useMotionValue(0)
+  const mouseY = useMotionValue(0)
+
+  // Distance from center → glow intensity (0 at edge, 1 at center)
+  const handleMouseMove = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const cx = rect.left + rect.width / 2
+    const cy = rect.top + rect.height / 2
+    mouseX.set((e.clientX - cx) / (rect.width / 2))   // -1 to 1
+    mouseY.set((e.clientY - cy) / (rect.height / 2))
+  }
+
+  const distance = useTransform([mouseX, mouseY], ([x, y]) => {
+    const d = Math.sqrt((x as number) ** 2 + (y as number) ** 2)
+    return Math.max(0, 1 - d) // 1 = dead center, 0 = edge
+  })
+
+  const glowAlpha  = useTransform(distance, [0, 1], [0.3, 0.85])
+  const glowRadius = useTransform(distance, [0, 1], [12, 28])
+
+  const boxShadow = useMotionTemplate`0 0 ${glowRadius}px rgba(120,220,180,${glowAlpha})`
+
+  return (
+    <motion.button
+      onMouseMove={handleMouseMove}
+      onMouseLeave={() => { mouseX.set(0); mouseY.set(0) }}
+      style={{ boxShadow }}
+      className="px-6 py-2 font-mono text-sm text-zinc-100 bg-zinc-900 border border-zinc-700 rounded"
+    >
+      {children}
+    </motion.button>
+  )
+}
+```
+
+Rules:
+- `useMotionTemplate` accepts a template literal with motion values interpolated in — it re-evaluates on the UI thread, no React re-render.
+- Use it for anything that builds a CSS string from animated values: `box-shadow`, `background`, `clip-path`, `filter`, `text-shadow`.
+- Always `set(0)` on `onMouseLeave` to reset to resting state, or use `useSpring` to ease back: `const springX = useSpring(mouseX, { stiffness: 80, damping: 15 })`.
+- Works at 60fps even with complex CSS string templates — the motion value system batches writes between frames.
+- Pair with `@property` (CSS) or `useMotionValue` + `interpolateColor` for color-interpolating glows — `rgba()` strings don't interpolate through CSS transitions but motion values do.
+
+**`useMotionValue` + `set()` vs React state — the performance reason:**
+
+```tsx
+// Wrong: React state re-renders on every mousemove
+const [xy, setXY] = useState({ x: 0, y: 0 }) // renders 60× per second = expensive
+
+// Right: motion value updates outside React's render cycle
+const x = useMotionValue(0)
+const y = useMotionValue(0)
+// set() never triggers a React render; only motion.div reads it
+```
+
 **`AnimatePresence` `mode` — pick the right one:**
 
 ```tsx
@@ -1012,6 +1113,32 @@ translateY.value = withSpring(targetValue, {
 | Spring chews CPU on a long tail | Raise `restSpeedThreshold` — declares done sooner, no visible difference |
 
 Defaults: `restDisplacementThreshold: 0.001`, `restSpeedThreshold: 2`. The displacement threshold is already very tight; the speed threshold is the one to tune in practice.
+
+**Velocity passthrough — pass gesture velocity to `withSpring` so motion continues from the finger's speed:**
+
+This is the most-missed detail in pan gesture → spring handoffs. Without `velocity`, the spring starts from rest even if the user was moving fast — it feels wrong and disconnected from the gesture. Always pass `e.velocityX` / `e.velocityY` from the gesture `onEnd` event:
+
+```tsx
+const pan = Gesture.Pan()
+  .onStart(() => { startX.value = translateX.value })
+  .onUpdate((e) => { translateX.value = startX.value + e.translationX })
+  .onEnd((e) => {
+    'worklet'
+    // Snap to nearest snap point, but CONTINUE from finger velocity
+    const snapTarget = findNearestSnapPoint(translateX.value)
+    translateX.value = withSpring(snapTarget, {
+      velocity: e.velocityX,   // hand off exact finger speed — spring picks up from here
+      damping: 22,
+      stiffness: 200,
+    })
+  })
+```
+
+Without `velocity: e.velocityX`: the spring starts from zero speed regardless of how fast the finger was moving. The element seems to "stutter" or briefly reverse before springing to the snap point — especially noticeable on fast swipes.
+
+With `velocity: e.velocityX`: the spring inherits the finger's momentum, overshoots naturally based on actual speed, then settles. Feels physically attached to the gesture.
+
+Same applies to vertical pan (`e.velocityY` → `translateY`), bottom sheets, drawers, and card stacks. The only time to skip it: a programmatic snap with no prior gesture (e.g. snapping to a position on button press — use `velocity: 0` or omit it).
 
 **`withClamp` — hard-limit the range of any animated value:**
 
