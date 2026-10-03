@@ -767,6 +767,105 @@ const y = useMotionValue(0)
 
 Countdown timers, scores, and live-updating numbers should use `mode="popLayout"`. Text or content that needs a clean handoff uses `mode="wait"`.
 
+### Lenis Smooth Scroll + Framer Motion `useScroll`
+
+Native browser scroll is not smooth — it steps discretely, which makes scroll-linked Framer Motion animations stutter on fast machines and on Safari. **Lenis** fixes this: it intercepts native scroll, runs a lerp/spring physics loop, and emits a smooth, interpolated scroll position that `useScroll` reads correctly.
+
+**Install:**
+```bash
+npm install lenis
+```
+
+**Next.js App Router setup — one `ReactLenis` provider wraps the layout:**
+
+```tsx
+// app/layout-client.tsx
+'use client'
+import { ReactLenis } from 'lenis/react'
+import type { ReactNode } from 'react'
+
+export function SmoothScrollProvider({ children }: { children: ReactNode }) {
+  return (
+    <ReactLenis root options={{ lerp: 0.1, duration: 1.2, smoothWheel: true }}>
+      {children}
+    </ReactLenis>
+  )
+}
+
+// app/layout.tsx (Server Component)
+import { SmoothScrollProvider } from './layout-client'
+
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <SmoothScrollProvider>{children}</SmoothScrollProvider>
+      </body>
+    </html>
+  )
+}
+```
+
+**Framer Motion `useScroll` works immediately once Lenis is installed** — no extra wiring needed. Lenis patches the native scroll API; Framer Motion reads `window.scrollY` as usual but now gets smooth values.
+
+**Key Lenis options:**
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `lerp` | `0.1` | Smoothing factor (0–1). Lower = smoother, more lag. `0.08`–`0.12` is the sweet spot. |
+| `duration` | `1.2` | Alternative to `lerp` — total scroll animation time in seconds. Use one or the other. |
+| `smoothWheel` | `true` | Smooth mouse wheel. Disable if the page uses native scroll-snap (`scroll-snap-type`). |
+| `syncTouch` | `false` | Apply smooth to touch. Usually leave `false` — native iOS momentum is already good. |
+| `easing` | `(t) => Math.min(1, 1.001 - Math.pow(2, -10 * t))` | The interpolation curve. Leave default unless customizing for brand feel. |
+
+**Lenis + CSS scroll-snap conflict** — do NOT use Lenis `smoothWheel: true` on containers that use `scroll-snap-type: y mandatory`. They fight over the scroll position and produce jank. Disable Lenis for those containers:
+
+```tsx
+// Snap container — tell Lenis to ignore it
+<div data-lenis-prevent>
+  <div className="snap-item h-screen">…</div>
+  <div className="snap-item h-screen">…</div>
+</div>
+```
+
+`data-lenis-prevent` opts the element out of Lenis entirely; native snap behavior is preserved.
+
+**Access the Lenis instance imperatively (e.g. scroll-to-top on route change):**
+
+```tsx
+'use client'
+import { useLenis } from 'lenis/react'
+import { usePathname } from 'next/navigation'
+import { useEffect } from 'react'
+
+export function ScrollToTopOnNavigate() {
+  const lenis = useLenis()
+  const pathname = usePathname()
+
+  useEffect(() => {
+    lenis?.scrollTo(0, { immediate: true })
+  }, [pathname, lenis])
+
+  return null
+}
+// Mount once inside SmoothScrollProvider — scroll snaps to top on every route change
+```
+
+**`lenis.scrollTo()` — programmatic smooth scroll:**
+
+```tsx
+lenis?.scrollTo('#section-id', { duration: 1.2, easing: (t) => t * (2 - t) })
+lenis?.scrollTo(targetEl, { offset: -80, duration: 0.8 }) // -80 for sticky header height
+lenis?.scrollTo(0, { immediate: true })                   // instant jump (route change)
+```
+
+**Does not work with Lenis:**
+- GSAP ScrollTrigger `pin` — Lenis scroll position and GSAP's pin conflict. If using pinned sections, use GSAP ScrollSmoother instead of Lenis.
+- `scroll-snap-type: mandatory` containers (use `data-lenis-prevent`).
+- `position: sticky` on Safari with Lenis `syncTouch: true` — leave touch native.
+
+---
+
 ### GSAP (complex web timelines)
 
 ```js
