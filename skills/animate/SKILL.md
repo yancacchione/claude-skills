@@ -3980,17 +3980,119 @@ void main() {
 ```
 
 **Speech-to-visible-text (Web Speech API):**
+
+Chrome/Edge only (Safari has no support as of 2026). Always use the standard API with webkit fallback — `webkitSpeechRecognition` alone breaks in newer Chrome without the prefix.
+
 ```js
-const recognition = new webkitSpeechRecognition()
+// Standard API first, webkit fallback — not just webkit
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+if (!SR) { /* show a "not supported" state */ return }
+
+const recognition = new SR()
 recognition.continuous = true
-recognition.interimResults = true
+recognition.interimResults = true  // fires partial results as you speak
+
 recognition.onresult = (e) => {
-  const transcript = [...e.results].map(r => r[0].transcript).join(' ')
-  overlayEl.textContent = transcript
-  // animate in with character split + scramble for a live-decode effect
+  let interim = '', finalText = ''
+  for (const result of e.results) {
+    if (result.isFinal) finalText += result[0].transcript + ' '
+    else interim += result[0].transcript
+  }
+  // interim = live, unconfirmed text → scramble/glitch animation
+  // finalText = confirmed phrase → lock in with clean reveal
 }
 recognition.start()
+// Always stop on cleanup: recognition.stop()
 ```
+
+**React hook — `useSpeechTranscript`:**
+
+```tsx
+import { useEffect, useRef, useState, useCallback } from 'react'
+
+function useSpeechTranscript() {
+  const [interim, setInterim] = useState('')
+  const [finals, setFinals] = useState<string[]>([])
+  const ref = useRef<SpeechRecognition | null>(null)
+
+  useEffect(() => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    if (!SR) return
+    const r: SpeechRecognition = new SR()
+    r.continuous = true
+    r.interimResults = true
+    r.onresult = (e: SpeechRecognitionEvent) => {
+      let live = ''
+      const newFinals: string[] = []
+      for (const result of Array.from(e.results)) {
+        if (result.isFinal) newFinals.push(result[0].transcript.trim())
+        else live += result[0].transcript
+      }
+      setInterim(live)
+      if (newFinals.length) setFinals(prev => [...prev, ...newFinals])
+    }
+    ref.current = r
+    return () => r.stop()
+  }, [])
+
+  const start = useCallback(() => ref.current?.start(), [])
+  const stop  = useCallback(() => ref.current?.stop(), [])
+  return { interim, finals, start, stop }
+}
+```
+
+**Photobooth live-decode captions** — words you say appear on screen with a scramble-then-resolve effect. Interim text scrambles while you speak; final text locks in cleanly:
+
+```tsx
+// Per-word scramble that resolves to the real character
+function ScrambleWord({ word }: { word: string }) {
+  const CHARS = '!#$%01アイウエオ'
+  const [display, setDisplay] = useState(word)
+
+  useEffect(() => {
+    let frame = 0
+    const total = word.length * 3  // 3 frames per character to resolve
+    const id = setInterval(() => {
+      setDisplay(
+        [...word].map((ch, i) =>
+          frame / total > i / word.length
+            ? ch
+            : CHARS[Math.floor(Math.random() * CHARS.length)]
+        ).join('')
+      )
+      if (++frame >= total) { clearInterval(id); setDisplay(word) }
+    }, 16)
+    return () => clearInterval(id)
+  }, [word])
+
+  return <span>{display}</span>
+}
+
+function PhotoboothCaptions() {
+  const { interim, finals, start, stop } = useSpeechTranscript()
+
+  return (
+    <div className="font-mono text-white absolute bottom-8 inset-x-0 px-6 text-center">
+      {/* Confirmed words — dimmer, smaller */}
+      <p className="text-sm opacity-40 mb-1">
+        {finals.map((phrase, i) => <span key={i}>{phrase} </span>)}
+      </p>
+      {/* Live word — scrambling while not yet confirmed */}
+      <p className="text-2xl tracking-wide">
+        {interim.split(' ').filter(Boolean).map((word, i) => (
+          <ScrambleWord key={`${word}-${i}`} word={word} />
+        ))}
+      </p>
+    </div>
+  )
+}
+```
+
+Rules:
+- `isFinal: true` = phrase recognized and committed. `isFinal: false` = interim, may change.
+- Scramble per-word on interim, clean lock-in on final — don't animate the already-final text.
+- Always call `recognition.stop()` on component unmount — leaving it running drains battery and keeps the mic indicator on.
+- Use `recognition.lang = 'en-US'` if the UI is English-only — the default uses the browser's system language.
 
 **Photobooth capture flash + countdown animation:**
 
