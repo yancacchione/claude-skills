@@ -444,6 +444,130 @@ When to use vs. `pretty`:
 
 **Next.js App Router** — wrap the snap container in a client component if you read `scrollY` from it; the container element itself can be server-rendered.
 
+**CSS sprite animation — frame-by-frame characters with `steps()`:**
+
+The right tool for Paper.design sprite sheets, game characters, and any multi-frame illusion without JS. Two approaches:
+
+**Option A: CSS background-position sprite sheet (one image, pure CSS):**
+
+```css
+/* Sprite sheet: N frames laid out horizontally, total width = frame-width * N */
+/* steps(N) jumps exactly N times — one jump per frame, no interpolation */
+@keyframes walk {
+  from { background-position: 0px 0px; }
+  to   { background-position: calc(-1 * var(--frame-w) * var(--frame-count)) 0px; }
+}
+
+.panda {
+  --frame-w: 120px;
+  --frame-count: 10;
+  width: var(--frame-w);
+  height: 150px;
+  background: url('/panda/walk-sprite.webp') no-repeat 0 0;
+  background-size: calc(var(--frame-w) * var(--frame-count)) auto;
+  animation: walk 1s steps(var(--frame-count)) infinite;
+}
+```
+
+`steps(N)` vs `steps(N, end)` vs `steps(N, start)`:
+- `steps(N)` / `steps(N, end)` — steps after each interval. Frame 1 shows first, then snaps. Use for sprite walks.
+- `steps(N, start)` — steps before each interval. Frame 2 shows immediately. Use when you want the last frame to hold.
+- Never use a smooth easing with sprite animation — it would interpolate between frame positions, producing a blur smear.
+
+**Option B: `<img>` frame swap with JS (multi-image, full control):**
+
+Better when frames come from separate files (e.g. Paper.design exports per-frame WebP) or when you need multi-phase sequences (walk → eat → walk → nap):
+
+```tsx
+// Preload frames on mount so first swap is instant
+const frames = Array.from({ length: 10 }, (_, i) => `/panda/walk-${i + 1}.webp`)
+
+useEffect(() => {
+  frames.forEach(src => { const img = new Image(); img.src = src })
+}, [])
+
+// Drive frame index with requestAnimationFrame or setInterval
+const [frameIdx, setFrameIdx] = useState(0)
+const FRAME_MS = 150
+
+useEffect(() => {
+  const id = setInterval(() => {
+    setFrameIdx(i => (i + 1) % frames.length)
+  }, FRAME_MS)
+  return () => clearInterval(id)
+}, [frames.length])
+
+return <img src={frames[frameIdx]} style={{ imageRendering: 'pixelated' }} />
+```
+
+**Multi-phase CSS keyframe timeline** — walk → eat → walk → nap using `animation-delay` and percentage holds:
+
+```css
+/* The cross-screen position and the frame sequence are two separate animations on two elements */
+
+/* Outer: cross-screen travel */
+@keyframes walk-across {
+  0%   { transform: translateX(-20vw); }
+  30%  { transform: translateX(45vw); }  /* arrive mid-screen */
+  62%  { transform: translateX(45vw); }  /* hold: eating phase */
+  84%  { transform: translateX(80vw); }  /* walk-on stop */
+  100% { transform: translateX(105vw); } /* exit right */
+}
+
+/* Inner: control which frame set is active via JS, keyed to animation progress */
+/* Check (currentTime / totalDuration) in a requestAnimationFrame loop to switch frame sets */
+```
+
+Tracking phase progress in JS:
+```tsx
+// Attach a Web Animations API animation to read its progress
+const anim = el.current?.getAnimations()[0]
+const checkPhase = () => {
+  if (!anim) return
+  const progress = (anim.currentTime as number) / (anim.effect?.getTiming().duration as number)
+  if (progress < 0.30) setPhase('walk-in')
+  else if (progress < 0.62) setPhase('eat')
+  else if (progress < 0.84) setPhase('walk-on')
+  else setPhase('nap')
+  requestAnimationFrame(checkPhase)
+}
+```
+
+**Paper.design → WebP sprite build script (Node.js):**
+
+Paper exports a sprite sheet SVG (one large canvas, N frames in a grid). To convert to per-frame WebP for `<img>` swap:
+
+```mjs
+// scripts/build-panda.mjs — slice a Paper sprite sheet into per-frame WebP files
+// Usage: node scripts/build-panda.mjs
+import { createCanvas, loadImage } from 'canvas'
+import { writeFileSync } from 'fs'
+
+const COLS = 5, ROWS = 2, FRAME_W = 440, FRAME_H = 560
+
+async function sliceSheet(srcPath, outDir, prefix) {
+  const img = await loadImage(srcPath)
+  const frameCount = COLS * ROWS
+  for (let i = 0; i < frameCount; i++) {
+    const col = i % COLS, row = Math.floor(i / COLS)
+    const canvas = createCanvas(FRAME_W, FRAME_H)
+    const ctx = canvas.getContext('2d')
+    // Baseline each frame onto a shared canvas size — prevents height jitter between frames
+    ctx.drawImage(img, col * FRAME_W, row * FRAME_H, FRAME_W, FRAME_H, 0, 0, FRAME_W, FRAME_H)
+    writeFileSync(`${outDir}/${prefix}-${i + 1}.webp`, canvas.toBuffer('image/webp', { quality: 0.92 }))
+  }
+}
+
+await sliceSheet('scripts/panda-sheet.png', 'public/panda', 'walk')
+```
+
+Rules:
+- **Always baseline onto a fixed canvas** — don't clip to the figure's bounding box. Variable heights cause the character to jump vertically between frames.
+- **WebP > PNG** for sprite frames — typically 50–70% smaller with identical quality at >0.9 quality.
+- **Preload all frames on mount** — a brief `useEffect` that creates `new Image()` for each src warms the browser cache so frame swaps never flicker.
+- **`imageRendering: 'pixelated'`** (CSS) — only if the frames are pixel art. For vector-exported Paper frames, omit it.
+- **`sessionStorage`** — for once-per-session splash animations, gate behind `sessionStorage.getItem('seen-splash')` so it doesn't replay on every navigation.
+
 ### Next.js App Router — animation constraints
 
 Every Framer Motion, Reanimated, or motion-hook call requires a client component. In Next.js App Router:
@@ -1948,6 +2072,60 @@ Calm empty state rules:
 - Opacity range **0.3–0.7**: perceptibly alive, not demanding attention
 - If there's a CTA (e.g. "Add your first question"), keep the button static — only the ambient message breathes
 - Pair with `text-wrap: balance` so the text never orphans a word on its own line
+
+**Module-colored ambient background — immersive journaling / reading mode (React Native):**
+
+When a screen takes over fullscreen for a focused activity (journaling, immersive reading, lesson), tinting the background to the active module/category color signals context shift without UI chrome. The tint should be desaturated, dark, and barely perceptible — an atmosphere, not a brand statement.
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedStyle, withTiming, interpolateColor
+} from 'react-native-reanimated'
+import { StyleSheet } from 'react-native'
+
+// Module color map — desaturated versions of brand tokens, never full saturation
+const MODULE_TINTS: Record<string, string> = {
+  reflection:  '#1a1a2e', // deep blue-navy
+  gratitude:   '#1a2a1e', // deep forest
+  creativity:  '#251820', // deep magenta-plum
+  mindfulness: '#1e1e1a', // near-neutral warm
+  default:     '#111111',
+}
+
+function ImmersiveScreen({ moduleKey, children }: { moduleKey: string; children: React.ReactNode }) {
+  const progress = useSharedValue(0)
+
+  useEffect(() => {
+    // Fade into the module tint on mount
+    progress.value = withTiming(1, { duration: 600 })
+    return () => {
+      progress.value = withTiming(0, { duration: 300 })
+    }
+  }, [])
+
+  const bgStyle = useAnimatedStyle(() => ({
+    backgroundColor: interpolateColor(
+      progress.value,
+      [0, 1],
+      ['#111111', MODULE_TINTS[moduleKey] ?? MODULE_TINTS.default]
+    ),
+  }))
+
+  return (
+    <Animated.View style={[StyleSheet.absoluteFill, bgStyle]}>
+      {children}
+    </Animated.View>
+  )
+}
+```
+
+Rules:
+- **Tint darkness matters more than hue** — if the color is too bright, it fights the text. Keep luminosity below 18–22% in HSL.
+- **600ms fade in, 300ms fade out** — coming in is slower (entering a mood), going out is faster (snapping back).
+- **Never animate on every re-render** — put the `withTiming` inside `useEffect`, not `useAnimatedStyle`. The style only reads the shared value.
+- **`interpolateColor` (not `interpolate`)** — colors need the dedicated function to blend correctly through RGB space.
+- If the module changes while the screen is open: animate from the current tint to the new one by also animating a `fromColor` shared value, or use `useDerivedValue` to compute the mid-point.
+- Pair with a `useFocusEffect` reset so the tint re-enters each time the screen gains focus (tab switch, back navigation).
 
 **`Gesture.Tap` + `Gesture.LongPress` — interactive press and hold:**
 
