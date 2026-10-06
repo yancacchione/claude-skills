@@ -108,6 +108,39 @@ const shouldReduce = useReducedMotion()
 scale.value = shouldReduce ? targetValue : withSpring(targetValue, { damping: 15 })
 ```
 
+**Direct `window.matchMedia` check — for non-hook contexts:**
+
+Use this when you need to know the preference *before* animation state is initialized, or outside a component (e.g. in a vanilla JS scroll handler, a CSS class decision in `useEffect`, or a splash screen that must decide its reduced path on first render):
+
+```tsx
+// In a useEffect — read once on mount before setting up animation timers
+useEffect(() => {
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  if (reduced) {
+    setPhase('done')  // skip the animation entirely
+    return
+  }
+  // ... set up full animation
+}, [])
+
+// Or listen for live changes (user changes OS setting while page is open)
+useEffect(() => {
+  const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+  const handler = (e: MediaQueryListEvent) => setReduced(e.matches)
+  mq.addEventListener('change', handler)
+  return () => mq.removeEventListener('change', handler)
+}, [])
+```
+
+CSS-only animations should also be covered in the stylesheet with `@media (prefers-reduced-motion: reduce)` — the JS check and the CSS rule are complementary, not alternatives. CSS disables class-driven animations; JS disables timer-driven and state-machine animations.
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  .splash-walker { animation: none; }
+  .splash-enter  { animation: none; opacity: 1; }
+}
+```
+
 ### Origin-Aware Animations
 
 Elements should animate from where they came from. A dropdown triggered by a button should open *from that button*, not from the center of the screen. A modal that slides up should feel anchored to its trigger. Use `transform-origin` to control this.
@@ -352,6 +385,44 @@ Without `@property`, CSS transitions on `--custom-vars` snap instead of interpol
 ```
 
 Support: Chrome 85+, Safari 16.4+, Firefox 128+. For the phosphor/neon aesthetic, this replaces opacity-only glow animations with true color-shift animations.
+
+**CSS custom properties as per-element keyframe parameters:**
+
+`@property` lets CSS *interpolate* custom vars. But you can also use *plain untyped* custom vars to *parameterize* `@keyframes` — one reusable animation definition, JS-computed stops per element. No `@property` declaration needed; the browser reads the var at each keyframe step.
+
+```css
+/* One keyframe that reads --stop-x and --exit-x from the element */
+@keyframes cross-screen {
+  0%          { transform: translateX(-160px); opacity: 0; }
+  20%, 40%    { transform: translateX(var(--stop-x)); opacity: 1; } /* hold at mid-point */
+  60%, 100%   { transform: translateX(var(--exit-x)); }
+}
+
+.walker {
+  animation: cross-screen 15000ms linear forwards;
+}
+```
+
+```tsx
+// React: set CSS vars inline — TypeScript needs the cast
+const stopX = `calc(50vw - ${SPRITE_W / 2}px)`  // JS-computed from viewport
+const exitX = `calc(84vw - ${SPRITE_W / 2}px)`
+
+<div
+  className="walker"
+  style={{
+    '--stop-x': stopX,
+    '--exit-x': exitX,
+  } as React.CSSProperties}
+/>
+```
+
+When to use this vs. JS animation:
+- Use when the animation curve/easing is fixed but the stop positions depend on element size or viewport — e.g. centering a sprite at mid-screen, a tooltip that opens toward the nearest edge
+- Do NOT use for values that need to smoothly interpolate (use `@property` or Framer Motion for those)
+- Combined with `@keyframes` hold frames (same percentage twice) this produces multi-phase animations with JS-computed coordinates and zero runtime JS per frame
+
+Note: Custom vars inside `@keyframes` are resolved at keyframe-matching time (when the animation runs), not at parse time — so the inline style is always in sync, even if the var changes.
 
 **`:has()` — parent/ancestor state from child state, no JS needed:**
 
