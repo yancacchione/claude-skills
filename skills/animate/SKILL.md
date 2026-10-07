@@ -2420,6 +2420,138 @@ function AnimatedRow({ id, isNew }: { id: string; isNew: boolean }) {
 
 Key rule: **only animate the new item** — re-animating the whole list on each subscription event is jarring and looks broken.
 
+**Scroll direction show/hide — reveal tab bar / FAB on scroll up, hide on scroll down:**
+
+The pattern for navigation elements that hide as the user reads, then reappear when they signal intent to navigate. The micro-interaction table lists it; here is the full implementation:
+
+```tsx
+import { useSharedValue, useAnimatedScrollHandler, useAnimatedStyle, withSpring } from 'react-native-reanimated'
+
+const HIDE_THRESHOLD = 8   // must scroll this far down before hiding
+const SHOW_THRESHOLD = 4   // must scroll this far up before showing
+
+function useScrollDirectionVisibility(hiddenOffset = 64) {
+  const lastScrollY = useSharedValue(0)
+  const translateY  = useSharedValue(0)  // 0 = visible, hiddenOffset = hidden (below screen)
+
+  const scrollHandler = useAnimatedScrollHandler({
+    onScroll: (e) => {
+      const current = e.contentOffset.y
+      const delta   = current - lastScrollY.value
+
+      if (current < 10) {
+        // Elastic top — always show
+        translateY.value = withSpring(0, { damping: 20, stiffness: 300 })
+      } else if (delta > HIDE_THRESHOLD) {
+        // Scrolling down → hide
+        translateY.value = withSpring(hiddenOffset, { damping: 20, stiffness: 300 })
+      } else if (delta < -SHOW_THRESHOLD) {
+        // Scrolling up → reveal
+        translateY.value = withSpring(0, { damping: 20, stiffness: 300 })
+      }
+
+      lastScrollY.value = current
+    },
+  })
+
+  const barStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: translateY.value }],
+  }))
+
+  return { scrollHandler, barStyle }
+}
+
+// Usage — bottom tab bar that hides when reading content:
+function BookScreen() {
+  const { scrollHandler, barStyle } = useScrollDirectionVisibility(80)
+
+  return (
+    <View style={{ flex: 1 }}>
+      <Animated.ScrollView
+        onScroll={scrollHandler}
+        scrollEventThrottle={16}
+        contentContainerStyle={{ paddingBottom: 80 }}
+      >
+        {/* content */}
+      </Animated.ScrollView>
+      <Animated.View style={[styles.tabBar, barStyle]}>
+        {/* tab items */}
+      </Animated.View>
+    </View>
+  )
+}
+```
+
+Rules:
+- **Track `lastScrollY` separately from `scrollY`** — `delta` is frame-to-frame change, not absolute position. Reading from 0 each time would hide on any downward scroll.
+- **`current < 10` force-show** — elastic overscroll at the top snaps `delta` negative → positive rapidly; anchoring to y < 10 prevents flicker.
+- **For a top header** that hides on scroll-down: same pattern, hidden state = `-height` (translate up off-screen), visible = 0.
+- **For a FAB** (floating action button): use `opacity` + `scale` instead of translateY — `opacity: 1→0`, `scale: 1→0.82` — floating elements feel more natural fading than sliding.
+- **For Expo Router `<Tabs>`** that should auto-hide: render the custom tab bar as an `Animated.View` absolutely positioned at the bottom, driven by this hook. The native `<Tabs>` bar cannot be animated this way — you must set `tabBar={...}` with a custom component.
+
+**Reanimated `Keyframe` API — custom entering/exiting beyond the presets:**
+
+Built-in presets (`FadeIn`, `FadeInDown`, `SlideInLeft`, etc.) cover 80% of cases. Use `Keyframe` when you need multi-stop precision — a hold, a bounce, a direction change — that no preset offers, or exact per-stop `easing` control.
+
+```tsx
+import Animated, { Keyframe, Easing } from 'react-native-reanimated'
+
+// Terminal / phosphor aesthetic — slides in from left, slight compress-then-expand
+const terminalEnter = new Keyframe({
+  0: {
+    opacity: 0,
+    transform: [{ translateX: -14 }, { scale: 0.97 }],
+    easing: Easing.out(Easing.cubic),
+  },
+  100: {
+    opacity: 1,
+    transform: [{ translateX: 0 }, { scale: 1 }],
+  },
+}).duration(220)
+
+// Exit — compress right, fade
+const terminalExit = new Keyframe({
+  0: {
+    opacity: 1,
+    transform: [{ translateX: 0 }, { scale: 1 }],
+    easing: Easing.in(Easing.cubic),
+  },
+  100: {
+    opacity: 0,
+    transform: [{ translateX: 10 }, { scale: 0.96 }],
+  },
+}).duration(160)
+
+// Multi-stop — bounce enter with precise hold at overshoot:
+const bounceEnter = new Keyframe({
+  0:   { opacity: 0, transform: [{ translateY: 18 }], easing: Easing.out(Easing.cubic) },
+  72:  { opacity: 1, transform: [{ translateY: -4 }], easing: Easing.inOut(Easing.cubic) },
+  100: { opacity: 1, transform: [{ translateY:  0 }] },
+}).duration(320)
+
+// Usage — identical to built-in presets:
+<Animated.View entering={terminalEnter} exiting={terminalExit}>
+  {/* component */}
+</Animated.View>
+
+// Chain delay + duration (same API as built-in presets):
+entering={bounceEnter.delay(80)}
+```
+
+`Keyframe` vs built-in presets:
+
+| Built-in (`FadeInDown`, etc.) | `Keyframe` |
+|-------------------------------|------------|
+| Quick setup for standard entrances | Multi-stop sequences (bounce, hold, reversal) |
+| `.springify()`, `.damping()`, `.delay()` modifiers | Per-keyframe `easing` — different curve per segment |
+| 80% of cases | Phosphor aesthetic, deliberate custom personality |
+
+Rules:
+- Keys are percentages `0–100`. Each key can set `easing` — it applies to the segment *from* that key to the next.
+- `transform` values in keyframes follow the same array format as `useAnimatedStyle`.
+- **Do NOT use `Keyframe` for gesture-driven animations** — use `withSpring`/`withTiming` in `useAnimatedStyle`. `Keyframe` is lifecycle-only (mount/unmount).
+- Omitting `easing` on a key defaults to `linear` for that segment. Set it explicitly on `0` to control the full animation curve.
+
 ### WebGL / GLSL (r3f or raw canvas)
 
 Key patterns: per-frame grain via `uTime`, simplex noise for organic movement, `mix()` for smooth transitions, `smoothstep()` for edge control.
