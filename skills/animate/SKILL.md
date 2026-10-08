@@ -290,6 +290,58 @@ When Yan shares a Paper.design or Figma spec, extract these motion properties be
 }
 ```
 
+**CSS `spring()` timing function — native spring physics with zero JS:**
+
+The CSS `spring()` function brings spring physics to CSS transitions without any JavaScript animation library. Supported in Chrome 136+, Safari 17.4+ (Firefox not yet as of 2026).
+
+```css
+/* spring(mass, stiffness, damping, initial-velocity) */
+
+/* Hover lift — physical, subtle overshoot */
+.card {
+  transition: transform 400ms spring(1, 80, 12, 0);
+}
+.card:hover {
+  transform: scale(1.03) translateY(-3px);
+}
+
+/* Snappy button press — fast settle, no bounce */
+.btn {
+  transition: transform 200ms spring(1, 400, 30, 0);
+}
+.btn:active {
+  transform: scale(0.96);
+}
+
+/* Playful toggle — bouncy */
+.toggle[aria-checked="true"] {
+  transform: translateX(24px);
+  transition: transform 500ms spring(0.8, 100, 8, 0);
+}
+```
+
+CSS spring parameters:
+
+| Param | Effect | Typical range |
+|-------|--------|---------------|
+| `mass` | Inertia — higher = slower start, longer tail | 0.5–2 |
+| `stiffness` | Tightness — higher = faster, snappier | 50–500 |
+| `damping` | Oscillation resistance — lower = more bounce | 5–50 |
+| `initial-velocity` | Starting speed — 0 for a resting start (almost always 0) | 0 |
+
+Provide a `@supports` fallback for Firefox:
+```css
+.card { transition: transform 300ms cubic-bezier(0.34, 1.56, 0.64, 1); } /* spring-like fallback */
+@supports (transition-timing-function: spring(1, 80, 10, 0)) {
+  .card { transition: transform 400ms spring(1, 80, 12, 0); }
+}
+```
+
+When to use CSS `spring()` vs Framer Motion spring:
+- **CSS `spring()`**: hover states, toggle feedback, simple CSS state changes — zero JS, no library, GPU-composited
+- **Framer Motion spring**: needs `AnimatePresence`, `layoutId`, gesture-driven motion, or JS-readable values
+- **Reanimated `withSpring`**: React Native / Expo (CSS is not available there)
+
 **`@starting-style` — animate elements entering from `display:none` without any JS:**
 
 Supported in Chrome 117+, Safari 17.5+, Firefox 129+. The correct way to animate dialogs, popovers, and conditionally-rendered elements without Framer Motion's AnimatePresence.
@@ -961,6 +1013,101 @@ const y = useMotionValue(0)
 | `popLayout` | rapidly-cycling counters, badges, notification numbers — exit leaves layout immediately so enter pops clean |
 
 Countdown timers, scores, and live-updating numbers should use `mode="popLayout"`. Text or content that needs a clean handoff uses `mode="wait"`.
+
+### `layoutId` — Shared Element Morphing
+
+`layoutId` is Framer Motion's "magic move": two `motion.div` elements anywhere in the React tree share the same `layoutId`, and Framer automatically animates between their positions and sizes when one mounts and the other unmounts. The classic use cases are card → detail expand, list item → hero, and active tab indicator pills.
+
+```tsx
+// Pattern: card list → full-screen detail overlay
+// Both the card and the overlay use the SAME layoutId strings.
+
+function CardList({ items, onSelect }) {
+  return items.map(item => (
+    <motion.div
+      key={item.id}
+      layoutId={`card-${item.id}`}         // ← the morph anchor
+      onClick={() => onSelect(item)}
+      className="card"
+    >
+      <motion.h2 layoutId={`title-${item.id}`}>{item.title}</motion.h2>
+      <motion.img layoutId={`img-${item.id}`} src={item.img} />
+    </motion.div>
+  ))
+}
+
+function DetailOverlay({ item, onClose }) {
+  return (
+    <motion.div
+      layoutId={`card-${item.id}`}         // ← same string — Framer morphs between them
+      className="detail-overlay"
+      onClick={onClose}
+    >
+      <motion.h2 layoutId={`title-${item.id}`}>{item.title}</motion.h2>
+      <motion.img layoutId={`img-${item.id}`} src={item.img} />
+      <p>{item.description}</p>
+    </motion.div>
+  )
+}
+
+// Parent — controls which is rendered:
+function Gallery() {
+  const [selected, setSelected] = useState(null)
+
+  return (
+    <>
+      <CardList items={items} onSelect={setSelected} />
+
+      <AnimatePresence>
+        {selected && (
+          <DetailOverlay item={selected} onClose={() => setSelected(null)} />
+        )}
+      </AnimatePresence>
+    </>
+  )
+}
+```
+
+Key rules:
+- `layoutId` values must be unique across the ENTIRE React tree at the same time — make them namespaced: `` `card-${id}` `` not just `"card"`.
+- If the two elements are in different React subtrees (different portals, route segments), wrap both in `<LayoutGroup id="gallery">` from `framer-motion` so Framer can find the pair.
+- The two elements can have completely different `className`, `style`, and children — Framer interpolates between them. Shared child elements with their own `layoutId` morph independently (title, image).
+- The `transition` prop on the `layoutId` element controls the morph spring. Default is a good spring; override with `transition={{ type: 'spring', stiffness: 300, damping: 30 }}`.
+- Add `style={{ originX: 0, originY: 0 }}` to the card if it should expand from its own corner rather than the center.
+- Combine with `mode="wait"` in `AnimatePresence` only when you also want a fade (usually unnecessary — the morph itself implies the transition).
+
+```tsx
+// Simpler: active indicator pill (tab bar / segment control)
+function Tabs({ tabs }) {
+  const [active, setActive] = useState(tabs[0].id)
+
+  return (
+    <div className="tabs">
+      {tabs.map(tab => (
+        <button key={tab.id} onClick={() => setActive(tab.id)} className="tab-btn">
+          {active === tab.id && (
+            <motion.span
+              layoutId="tab-pill"          // only ONE instance rendered at a time
+              className="tab-pill"
+              transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+            />
+          )}
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+```
+
+Decision table:
+| Pattern | Tool |
+|---------|------|
+| Card list → full-screen detail | `layoutId` on card + child elements |
+| Tab / segment active indicator | `layoutId` on the pill span, one instance |
+| Image gallery → lightbox | `layoutId` on `motion.img` |
+| Accordion item → expanded card | `layoutId` on the container, `layout` on children |
+| Route A → route B shared element | `layoutId` + `LayoutGroup` across routes |
 
 ### Lenis Smooth Scroll + Framer Motion `useScroll`
 
