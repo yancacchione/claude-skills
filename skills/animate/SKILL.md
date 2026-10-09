@@ -2517,6 +2517,109 @@ import { MotiView, MotiText } from 'moti'
   transition={{ type: 'timing', duration: 300 }} />
 ```
 
+### Core React Native `Animated` API (no Reanimated)
+
+Use when Reanimated is **not** in the project (`react-native-reanimated` not in `package.json`). The built-in `Animated` module ships with React Native — zero extra deps.
+
+**Decision matrix: which animation primitive to use?**
+
+| Situation | Reach for |
+|-----------|----------|
+| No Reanimated, simple fade/slide | `Animated.Value` + `Animated.timing` |
+| No Reanimated, press scale feedback | `TouchableOpacity` `activeOpacity` |
+| No Reanimated, list item add/remove | `LayoutAnimation.configureNext(...)` |
+| Reanimated installed, any gesture | `useSharedValue` + Gesture Handler |
+| Reanimated installed, scroll-driven | `useScrollViewOffset` + `useAnimatedStyle` |
+
+**`Animated.Value` — fade + slide in:**
+
+```tsx
+import { Animated, Easing } from 'react-native'
+import { useRef, useEffect } from 'react'
+
+function FadeSlideIn({ children }: { children: React.ReactNode }) {
+  const opacity = useRef(new Animated.Value(0)).current
+  const translateY = useRef(new Animated.Value(12)).current
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(opacity,     { toValue: 1, duration: 300, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(translateY,  { toValue: 0, duration: 300, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+    ]).start()
+  }, [])
+
+  return (
+    <Animated.View style={{ opacity, transform: [{ translateY }] }}>
+      {children}
+    </Animated.View>
+  )
+}
+```
+
+**`Animated.spring` — press feedback without Reanimated:**
+
+```tsx
+import { Animated, Pressable } from 'react-native'
+import { useRef } from 'react'
+
+function SpringCard({ onPress, children }: { onPress: () => void; children: React.ReactNode }) {
+  const scale = useRef(new Animated.Value(1)).current
+
+  const pressIn  = () => Animated.spring(scale, { toValue: 0.96, useNativeDriver: true, speed: 50, bounciness: 0 }).start()
+  const pressOut = () => Animated.spring(scale, { toValue: 1,    useNativeDriver: true, speed: 50, bounciness: 4  }).start()
+
+  return (
+    <Pressable onPressIn={pressIn} onPressOut={pressOut} onPress={onPress}>
+      <Animated.View style={{ transform: [{ scale }] }}>
+        {children}
+      </Animated.View>
+    </Pressable>
+  )
+}
+```
+
+`TouchableOpacity` is even simpler when you just need opacity feedback and no spring:
+
+```tsx
+<TouchableOpacity activeOpacity={0.6} onPress={handlePress}>
+  {/* content — opacity briefly drops to 0.6 on press, no code needed */}
+</TouchableOpacity>
+```
+
+**`LayoutAnimation` — animate list changes with one line:**
+
+`LayoutAnimation.configureNext` tells RN to animate the *next* state update that changes the layout. Zero per-component code.
+
+```tsx
+import { LayoutAnimation, Platform, UIManager } from 'react-native'
+
+// Android requires explicit enablement (no-op on iOS)
+if (Platform.OS === 'android') {
+  UIManager.setLayoutAnimationEnabledExperimental?.(true)
+}
+
+// Before any setState that adds/removes/reorders items:
+LayoutAnimation.configureNext(LayoutAnimation.Presets.spring)
+setItems(prev => prev.filter(i => i.id !== removedId))
+
+// Or use the easing preset:
+LayoutAnimation.configureNext({
+  duration: 250,
+  update: { type: LayoutAnimation.Types.easeInEaseOut },
+  delete: { type: LayoutAnimation.Types.easeIn, property: LayoutAnimation.Properties.opacity },
+  create: { type: LayoutAnimation.Types.easeOut, property: LayoutAnimation.Properties.opacity },
+})
+```
+
+`LayoutAnimation.Presets`: `easeInEaseOut` (default), `linear`, `spring`.
+
+Rules:
+- `useNativeDriver: true` is critical — without it, animations run on the JS thread and drop frames
+- `useNativeDriver` only supports `transform` and `opacity` — not `width`, `height`, `backgroundColor`
+- For color or size animations without Reanimated, use `Animated.timing` with `useNativeDriver: false` (accepts frame drops)
+- `LayoutAnimation` animates ALL layout changes in the next render — if multiple things change, they all animate. Guard with a boolean if you need to be selective.
+- Reanimated 3 is strictly superior in every dimension; `Animated`/`LayoutAnimation` is the fallback when the project hasn't added it yet.
+
 ### Supabase Realtime + Animation
 
 When data arrives from a Supabase realtime subscription, animate the new item in rather than letting it pop. Pattern for React Native:
