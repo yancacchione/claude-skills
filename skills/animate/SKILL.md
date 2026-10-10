@@ -3031,6 +3031,221 @@ function FeedbackEffect() {
 }
 ```
 
+**Webcam → Three.js VideoTexture (live camera as GLSL input):**
+
+The missing piece for photobooth and camera-reactive effects — pipe `getUserMedia` video into a `THREE.VideoTexture` so GLSL shaders can sample it as `uInput` or any uniform sampler.
+
+```tsx
+import { useEffect, useRef } from 'react'
+import * as THREE from 'three'
+
+// Returns a VideoTexture that updates every frame from the user's camera
+// Call once on mount; pass the texture to your ShaderMaterial as a uniform
+export function useWebcamTexture(): { texture: THREE.VideoTexture | null; ready: boolean } {
+  const [texture, setTexture] = useState<THREE.VideoTexture | null>(null)
+  const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    let video: HTMLVideoElement
+    let tex: THREE.VideoTexture
+
+    navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false })
+      .then((stream) => {
+        video = document.createElement('video')
+        video.srcObject = stream
+        video.playsInline = true
+        video.muted = true
+        video.play()
+
+        video.addEventListener('playing', () => {
+          tex = new THREE.VideoTexture(video)
+          tex.minFilter = THREE.LinearFilter
+          tex.magFilter = THREE.LinearFilter
+          tex.format = THREE.RGBAFormat
+          // Mirror for selfie view — negate X in GLSL or flip here:
+          tex.wrapS = THREE.RepeatWrapping
+          tex.repeat.x = -1  // horizontal mirror
+          tex.offset.x = 1
+          setTexture(tex)
+          setReady(true)
+        }, { once: true })
+      })
+      .catch((err) => console.warn('Camera access denied:', err))
+
+    return () => {
+      tex?.dispose()
+      const stream = video?.srcObject as MediaStream
+      stream?.getTracks().forEach(t => t.stop())
+    }
+  }, [])
+
+  return { texture, ready }
+}
+
+// Usage in r3f — pass the VideoTexture as uInput to the feedback shader
+function WebcamFeedback() {
+  const { texture, ready } = useWebcamTexture()
+  const matRef = useRef<THREE.ShaderMaterial>(null)
+
+  useFrame(({ clock }) => {
+    if (matRef.current && texture) {
+      texture.needsUpdate = true  // required every frame — tells Three.js to re-upload the video frame
+      matRef.current.uniforms.uInput.value = texture
+      matRef.current.uniforms.uTime.value = clock.elapsedTime
+    }
+  })
+
+  if (!ready || !texture) return null
+
+  return (
+    <mesh>
+      <planeGeometry args={[2, 2]} />
+      <shaderMaterial
+        ref={matRef}
+        uniforms={{ uInput: { value: texture }, uTime: { value: 0 } }}
+        vertexShader={`varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`}
+        fragmentShader={`
+          uniform sampler2D uInput;
+          uniform float uTime;
+          varying vec2 vUv;
+          void main() { gl_FragColor = texture2D(uInput, vUv); }
+        `}
+      />
+    </mesh>
+  )
+}
+```
+
+Rules:
+- **`texture.needsUpdate = true` every frame** — without this, Three.js only uploads the first video frame. This is the most common webcam texture bug.
+- **`video.playsInline = true` + `video.muted = true`** — both required for autoplay to work without user gesture on mobile.
+- `tex.repeat.x = -1; tex.offset.x = 1` — mirrors the webcam for selfie orientation. Alternatively, `uv.x = 1.0 - vUv.x` in the fragment shader.
+- For greenscreen keying: sample `uInput`, compare pixel's G channel against a threshold, discard (`discard`) or replace with background texture.
+- **CORS / permissions**: `getUserMedia` requires HTTPS (or localhost). In Next.js dev, use `next dev --experimental-https`.
+
+**Audio-reactive GLSL — Web Audio API FFT → shader uniform:**
+
+Feed frequency data from the microphone or audio element into GLSL as a 1D data texture. Each bar of the equalizer becomes a texel — the shader reads it with `texture2D`.
+
+```tsx
+import { useEffect, useRef, useState } from 'react'
+import * as THREE from 'three'
+
+// Creates a DataTexture updated from an AnalyserNode each frame
+// frequencyBinCount controls resolution (power of 2: 32–2048)
+export function useAudioTexture(source: 'microphone' | HTMLMediaElement = 'microphone') {
+  const analyserRef  = useRef<AnalyserNode | null>(null)
+  const dataRef      = useRef<Uint8Array | null>(null)
+  const [texture, setTexture] = useState<THREE.DataTexture | null>(null)
+
+  useEffect(() => {
+    const ctx = new AudioContext()
+    const analyser = ctx.createAnalyser()
+    analyser.fftSize = 256          // 128 frequency bins (fftSize / 2)
+    analyser.smoothingTimeConstant = 0.8  // 0 = no smoothing, 1 = max lag
+
+    const data = new Uint8Array(analyser.frequencyBinCount)  // 128 bytes, 0–255
+    const tex = new THREE.DataTexture(data, analyser.frequencyBinCount, 1, THREE.LuminanceFormat)
+    tex.needsUpdate = true
+
+    let sourceNode: AudioNode
+
+    if (source === 'microphone') {
+      navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then((stream) => {
+        sourceNode = ctx.createMediaStreamSource(stream)
+        sourceNode.connect(analyser)
+        // Note: don't connect analyser to ctx.destination — you'd hear your own mic
+      })
+    } else {
+      // HTML <audio> or <video> element
+      sourceNode = ctx.createMediaElementSource(source)
+      sourceNode.connect(analyser)
+      analyser.connect(ctx.destination)  // do connect for media — user expects to hear it
+    }
+
+    analyserRef.current = analyser
+    dataRef.current = data
+    setTexture(tex)
+
+    return () => { ctx.close() }
+  }, [])
+
+  // Call this in useFrame to push fresh FFT data to the texture each frame
+  const updateTexture = () => {
+    if (analyserRef.current && dataRef.current && texture) {
+      analyserRef.current.getByteFrequencyData(dataRef.current)
+      texture.needsUpdate = true
+    }
+  }
+
+  return { texture, updateTexture }
+}
+
+// GLSL — read frequency bands from the data texture
+const audioFragmentShader = /* glsl */`
+  uniform sampler2D uFreq;     // 1D frequency texture (128×1 luminance)
+  uniform float uTime;
+  varying vec2 vUv;
+
+  void main() {
+    // Sample specific bands: bass = 0.0–0.1, mids = 0.1–0.5, highs = 0.5–1.0
+    float bass   = texture2D(uFreq, vec2(0.05, 0.5)).r;  // ~100Hz
+    float mid    = texture2D(uFreq, vec2(0.25, 0.5)).r;  // ~2kHz
+    float treble = texture2D(uFreq, vec2(0.75, 0.5)).r;  // ~8kHz
+
+    // Beat-reactive scale — brighten entire frame on bass hit
+    float beatGlow = smoothstep(0.6, 1.0, bass) * 0.4;
+
+    // Color shift by frequency balance
+    vec3 col = vec3(bass, mid * 0.5, treble) + beatGlow;
+
+    // Add grain for texture
+    float g = fract(sin(dot(vUv * 300.0 + uTime, vec2(12.9898, 78.233))) * 43758.5) * 0.06;
+    gl_FragColor = vec4(col + g, 1.0);
+  }
+`
+
+// r3f usage:
+function AudioReactiveScene() {
+  const { texture, updateTexture } = useAudioTexture('microphone')
+  const matRef = useRef<THREE.ShaderMaterial>(null)
+
+  useFrame(({ clock }) => {
+    updateTexture()
+    if (matRef.current) matRef.current.uniforms.uTime.value = clock.elapsedTime
+  })
+
+  if (!texture) return null
+
+  return (
+    <mesh>
+      <planeGeometry args={[2, 2]} />
+      <shaderMaterial
+        ref={matRef}
+        uniforms={{ uFreq: { value: texture }, uTime: { value: 0 } }}
+        vertexShader={`varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`}
+        fragmentShader={audioFragmentShader}
+      />
+    </mesh>
+  )
+}
+```
+
+Key frequency bands and what they drive:
+
+| UV x range | Freq range | Drive |
+|------------|------------|-------|
+| `0.0–0.1` | Sub-bass (~20–100Hz) | Scale, beat flash, pulse |
+| `0.1–0.3` | Bass (~100–500Hz) | Color saturation, glow |
+| `0.3–0.6` | Mids (~500–4kHz) | Displacement, warp strength |
+| `0.6–1.0` | Highs (~4–20kHz) | Grain intensity, shimmer |
+
+Rules:
+- `smoothingTimeConstant: 0.8` is important — raw FFT flickers too fast to look good. 0.6–0.85 is the visual sweet spot.
+- **`fftSize` must be a power of 2** (`32`, `64`, `128`, `256`, `512`, `2048`). Higher = more frequency resolution, lower = more responsive to transients.
+- `AudioContext` requires a user gesture to start on most browsers — call `ctx.resume()` inside a click handler if the first beat doesn't register.
+- Combine with the ping-pong feedback loop: use `bass` to drive `uDecay` (louder = slower fade = more trails) and `treble` to drive `uDisplace` (high frequencies = more spatial distortion).
+
 ---
 
 ## Micro-Interaction Patterns
