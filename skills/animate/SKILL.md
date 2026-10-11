@@ -3120,8 +3120,108 @@ Rules:
 - **`texture.needsUpdate = true` every frame** — without this, Three.js only uploads the first video frame. This is the most common webcam texture bug.
 - **`video.playsInline = true` + `video.muted = true`** — both required for autoplay to work without user gesture on mobile.
 - `tex.repeat.x = -1; tex.offset.x = 1` — mirrors the webcam for selfie orientation. Alternatively, `uv.x = 1.0 - vUv.x` in the fragment shader.
-- For greenscreen keying: sample `uInput`, compare pixel's G channel against a threshold, discard (`discard`) or replace with background texture.
 - **CORS / permissions**: `getUserMedia` requires HTTPS (or localhost). In Next.js dev, use `next dev --experimental-https`.
+
+**Greenscreen / chroma-key GLSL — full implementation:**
+
+Replace any color range in the webcam feed with a background texture. Works for both green-screen and blue-screen; the key is working in HSV space so hue match is color-temperature-independent.
+
+```glsl
+uniform sampler2D uInput;       // webcam VideoTexture
+uniform sampler2D uBackground;  // replacement background (image or another texture)
+uniform float uKeyHue;          // target hue in 0–1 (green = 0.33, blue = 0.67)
+uniform float uHueTolerance;    // hue band width (0.12 for tight, 0.2 for loose)
+uniform float uSpill;           // how much to suppress green spill on edges (0.5–1.0)
+varying vec2 vUv;
+
+// RGB → HSV (returns vec3(h, s, v), all 0–1)
+vec3 rgb2hsv(vec3 c) {
+  vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y);
+  float e = 1.0e-10;
+  return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+void main() {
+  vec4 fg  = texture2D(uInput, vUv);
+  vec4 bg  = texture2D(uBackground, vUv);
+  vec3 hsv = rgb2hsv(fg.rgb);
+
+  // Hue distance (wrap-around safe)
+  float hueDist = abs(hsv.x - uKeyHue);
+  hueDist = min(hueDist, 1.0 - hueDist); // handle 0/1 wrap
+  
+  // Key mask: smooth falloff at edges (smoothstep avoids hard aliased matte)
+  float mask = smoothstep(0.0, uHueTolerance, hueDist);
+  // Boost mask in low-saturation areas (hair edges, semi-transparent regions)
+  mask = max(mask, 1.0 - hsv.y * 2.0); // near-grey pixels are less keyed
+
+  // Green spill suppression — neutralise residual green cast on the matte edge
+  vec3 spillFixed = fg.rgb;
+  float spillAmount = (1.0 - mask) * uSpill;
+  spillFixed.g -= spillAmount * fg.g;                  // remove green channel
+  spillFixed.rb += spillAmount * 0.5 * fg.g;           // redistribute to r/b
+
+  // Composite
+  gl_FragColor = mix(bg, vec4(spillFixed, fg.a), mask);
+}
+```
+
+Usage in r3f:
+```tsx
+uniforms={{
+  uInput:        { value: webcamTexture },
+  uBackground:   { value: bgTexture },
+  uKeyHue:       { value: 0.33 },    // 0.33 = green, 0.67 = blue
+  uHueTolerance: { value: 0.15 },    // widen if edges are ragged
+  uSpill:        { value: 0.7 },     // lower = subtler, higher = more correction
+}}
+```
+
+Tuning guidance:
+- Start with `uHueTolerance: 0.15`. If the subject has holes, widen to 0.20. If the background bleeds in, narrow to 0.10.
+- `uSpill: 0.7` removes the green fringe without graying out skin tones.
+- For video backgrounds: make `uBackground` a `THREE.VideoTexture` and call `needsUpdate = true` each frame the same as the webcam.
+- "Rate me" / analysis overlay: render UI elements to a `THREE.CanvasTexture` (draw to a 2D canvas), then use as a third layer over the composited result.
+
+**Pixelation filter GLSL:**
+
+```glsl
+// Pixelate — quantize UVs to a grid; simplest photobooth effect, zero overhead
+uniform sampler2D uTexture;
+uniform vec2  uResolution;  // canvas size in px (e.g. 1280, 720)
+uniform float uPixelSize;   // pixel block size in screen-px (4 = subtle, 16 = heavy, 64 = extreme)
+varying vec2 vUv;
+
+void main() {
+  // Snap UVs to the nearest pixel-block corner
+  vec2 pixelUV = floor(vUv * uResolution / uPixelSize) * uPixelSize / uResolution;
+  gl_FragColor = texture2D(uTexture, pixelUV);
+}
+```
+
+Animated pixelation (start pixelated → sharpen on reveal):
+```glsl
+// uPixelSize animated 64 → 1 over ~600ms; use withTiming or GSAP to drive the uniform
+uniform float uPixelSize; // drive from JS: withTiming(1, { duration: 600 })
+// At uPixelSize = 1, floor() is a no-op and the image is sharp
+```
+
+React hook to drive it:
+```tsx
+const pixelSize = useMotionValue(64)
+// In useEffect: animate(pixelSize, 1, { duration: 0.6, ease: 'easeOut' })
+// In useFrame: mat.uniforms.uPixelSize.value = pixelSize.get()
+```
+
+| `uPixelSize` | Look |
+|---|---|
+| 1–2 | Full resolution (no pixelation) |
+| 4–8 | Subtle retro / lo-fi |
+| 16–32 | Classic 8-bit feel |
+| 48–64 | Extreme / debut reveal effect |
 
 **Audio-reactive GLSL — Web Audio API FFT → shader uniform:**
 
@@ -5497,6 +5597,171 @@ function initRain(canvas) {
 - **Scale the grid**: fewer columns = more abstract / brutal. More = representational.
 - **Monospace is non-negotiable** — proportional fonts break the grid alignment.
 - **Char aspect ratio correction**: multiply rows by ~0.45 because monospace chars are roughly twice as tall as wide.
+
+---
+
+## Web Speech API — Live Transcript Overlay
+
+The "words you say appear on screen" photobooth effect. The Web Speech API delivers interim (in-progress) and final (committed) words in real time — animate each word as it lands.
+
+```tsx
+'use client'
+import { useEffect, useRef, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
+
+// Extends the global Window type for webkit prefix
+declare global {
+  interface Window {
+    SpeechRecognition: typeof SpeechRecognition
+    webkitSpeechRecognition: typeof SpeechRecognition
+  }
+}
+
+type Word = { id: number; text: string; final: boolean }
+
+export function useLiveTranscript() {
+  const [words, setWords] = useState<Word[]>([])
+  const [listening, setListening] = useState(false)
+  const recogRef = useRef<SpeechRecognition | null>(null)
+  const idRef = useRef(0)
+
+  const start = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR) return console.warn('SpeechRecognition not supported')
+
+    const r = new SR()
+    r.continuous = true         // don't stop after first sentence
+    r.interimResults = true     // deliver words as they're spoken
+    r.lang = 'en-US'
+
+    r.onresult = (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const transcript = e.results[i][0].transcript.trim()
+        const isFinal = e.results[i].isFinal
+        if (!transcript) continue
+
+        if (isFinal) {
+          // Split final result into individual words, animate each
+          const newWords = transcript.split(/\s+/).filter(Boolean).map(text => ({
+            id: ++idRef.current,
+            text,
+            final: true,
+          }))
+          setWords(prev => [...prev, ...newWords].slice(-40)) // keep last 40 words
+        }
+      }
+    }
+
+    r.onend = () => {
+      // Restart automatically for continuous recognition
+      if (recogRef.current) recogRef.current.start()
+    }
+
+    r.start()
+    recogRef.current = r
+    setListening(true)
+  }
+
+  const stop = () => {
+    recogRef.current?.stop()
+    recogRef.current = null
+    setListening(false)
+  }
+
+  useEffect(() => () => { recogRef.current?.stop() }, [])
+
+  return { words, listening, start, stop }
+}
+
+// Animated word cloud / rolling subtitle — phosphor aesthetic
+export function LiveWordOverlay() {
+  const { words, listening, start, stop } = useLiveTranscript()
+
+  return (
+    <div className="fixed inset-0 pointer-events-none flex flex-col justify-end p-8">
+      {/* Word stream — each word flies in from below */}
+      <div className="flex flex-wrap gap-x-2 gap-y-1 justify-center">
+        <AnimatePresence mode="popLayout">
+          {words.map(w => (
+            <motion.span
+              key={w.id}
+              layout
+              initial={{ opacity: 0, y: 16, filter: 'blur(4px)' }}
+              animate={{ opacity: 1, y: 0,  filter: 'blur(0px)' }}
+              exit={{ opacity: 0, scale: 0.85 }}
+              transition={{ duration: 0.25, ease: 'easeOut' }}
+              className="font-mono text-2xl text-white tracking-tight"
+              style={{ textShadow: '0 0 20px rgba(255,255,255,0.5)' }}
+            >
+              {w.text}
+            </motion.span>
+          ))}
+        </AnimatePresence>
+      </div>
+
+      {/* Mic toggle — needs pointer-events */}
+      <button
+        onClick={listening ? stop : start}
+        className="pointer-events-auto mt-4 mx-auto font-mono text-xs text-zinc-400"
+      >
+        {listening ? '● stop' : '○ start'}
+      </button>
+    </div>
+  )
+}
+```
+
+**Kinetic variant — words appear at random positions (photobooth scatter effect):**
+
+```tsx
+type ScatterWord = Word & { x: number; y: number; rotate: number; size: number }
+
+export function ScatterOverlay() {
+  const { words, start } = useLiveTranscript()
+
+  const scattered: ScatterWord[] = words.map(w => ({
+    ...w,
+    x: Math.random() * 80 + 10,              // 10–90% across screen
+    y: Math.random() * 70 + 10,              // 10–80% down screen
+    rotate: (Math.random() - 0.5) * 20,      // ±10°
+    size: 1.2 + Math.random() * 1.8,         // 1.2–3rem
+  }))
+
+  return (
+    <div className="fixed inset-0 pointer-events-none overflow-hidden" onClick={start}>
+      <AnimatePresence>
+        {scattered.map(w => (
+          <motion.span
+            key={w.id}
+            initial={{ opacity: 0, scale: 0.4 }}
+            animate={{ opacity: 0.9, scale: 1 }}
+            exit={{ opacity: 0, scale: 1.4, transition: { duration: 1.5 } }}
+            transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+            style={{
+              position: 'absolute',
+              left: `${w.x}%`,
+              top: `${w.y}%`,
+              rotate: w.rotate,
+              fontSize: `${w.size}rem`,
+            }}
+            className="font-mono text-white whitespace-nowrap"
+          >
+            {w.text}
+          </motion.span>
+        ))}
+      </AnimatePresence>
+    </div>
+  )
+}
+```
+
+Rules:
+- `r.continuous = true` + manual restart in `r.onend` — without this, recognition stops after a few seconds of silence.
+- `interimResults: true` is needed to show the word while the user is still speaking; use `isFinal` to decide when to commit it permanently.
+- Chrome/Edge: full support. Safari 17.4+: supported. Firefox: not supported — add `if (!SR) return` guard and show a fallback message.
+- Needs microphone permission (`getUserMedia` audio or SpeechRecognition prompts its own). In Next.js, add `Permissions-Policy: microphone=()` header only if you need to *restrict* it — otherwise it's allowed by default.
+- `words.slice(-40)` cap prevents unbounded DOM growth in long sessions.
+- For the "aura behind you" feature: combine with greenscreen keying — key the background, then render a blurred, color-shifted copy of the person layer as a glow under them.
 
 ---
 
