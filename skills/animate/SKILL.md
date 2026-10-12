@@ -5765,7 +5765,356 @@ Rules:
 
 ---
 
-## Output Format
+## React Native Skia — Creative Drawing & Image Effects on Mobile
+
+`@shopify/react-native-skia` exposes the Skia graphics engine directly in React Native — the same GPU rasterizer Chrome and Android use. It's the right tool for blur effects, custom canvas drawing, image filters, and animated visual effects that can't be achieved with `Animated` styles alone. Use it when Reanimated reaches its limits for creative/visual work.
+
+**Install:**
+```bash
+npx expo install @shopify/react-native-skia
+```
+
+Skia runs on the UI thread via JSI — no bridge, same performance tier as Reanimated 3. Always pair them.
+
+### Canvas Basics
+
+```tsx
+import { Canvas, Rect, Circle, Path, Skia, Group, Paint } from '@shopify/react-native-skia'
+
+// Canvas is the root — everything inside is GPU-rendered
+<Canvas style={{ width: 300, height: 300 }}>
+  <Rect x={10} y={10} width={100} height={50} color="#a1a1aa" />
+  <Circle cx={150} cy={150} r={60} color="#18181b" />
+</Canvas>
+```
+
+### Animated Skia Values (Reanimated 3 integration)
+
+Skia has its own value system, but use `useSharedValueEffect` to drive Skia from Reanimated shared values — this lets gesture handlers, springs, and scroll-linked values control Skia drawing:
+
+```tsx
+import {
+  Canvas, Circle, Fill, useValue, useSharedValueEffect
+} from '@shopify/react-native-skia'
+import { useSharedValue, withSpring } from 'react-native-reanimated'
+
+function AnimatedCircle() {
+  const rAnimated = useSharedValue(40)          // Reanimated shared value
+  const rSkia     = useValue(40)               // Skia value — read by Canvas
+
+  // Bridge: whenever rAnimated changes on the UI thread, update rSkia
+  useSharedValueEffect(() => {
+    rSkia.current = rAnimated.value
+  }, rAnimated)
+
+  // Tap to spring-animate the radius
+  const handlePress = () => {
+    rAnimated.value = withSpring(80, { damping: 12 })
+  }
+
+  return (
+    <Canvas style={{ width: 200, height: 200 }} onTouchEnd={handlePress}>
+      <Circle cx={100} cy={100} r={rSkia} color="#a1a1aa" />
+    </Canvas>
+  )
+}
+```
+
+### Blur Effects (phosphor glow aesthetic)
+
+```tsx
+import { Canvas, Circle, BlurMask, Rect, LinearGradient, vec } from '@shopify/react-native-skia'
+
+// Outer glow — element glows outward (like neon tubes)
+<Canvas style={{ width: 200, height: 100 }}>
+  <Rect x={20} y={20} width={160} height={60} color="#00ff88">
+    <BlurMask blur={12} style="outer" />
+  </Rect>
+</Canvas>
+
+// Inner glow — depth, pressed-in feel
+<Canvas style={{ width: 200, height: 100 }}>
+  <Rect x={20} y={20} width={160} height={60} color="#18181b">
+    <BlurMask blur={8} style="inner" />
+  </Rect>
+</Canvas>
+
+// Solid blur — softens edges of any shape (for shadow replacement)
+// blur prop controls radius; style: 'outer' | 'inner' | 'solid' | 'normal'
+```
+
+### Gradient Canvas
+
+```tsx
+import { Canvas, Rect, LinearGradient, RadialGradient, SweepGradient, vec } from '@shopify/react-native-skia'
+
+// Linear gradient fill
+<Canvas style={{ width: 300, height: 200 }}>
+  <Rect x={0} y={0} width={300} height={200}>
+    <LinearGradient
+      start={vec(0, 0)}
+      end={vec(300, 200)}
+      colors={['#0f0f11', '#1a1a2e', '#0f0f11']}
+    />
+  </Rect>
+</Canvas>
+
+// Radial — spotlight / vignette effect
+<Canvas style={{ width: 300, height: 300 }}>
+  <Rect x={0} y={0} width={300} height={300}>
+    <RadialGradient
+      c={vec(150, 150)}    // center
+      r={200}               // radius
+      colors={['rgba(255,255,255,0.15)', 'transparent']}
+    />
+  </Rect>
+</Canvas>
+
+// Sweep — conic gradient (rotating halo)
+<Canvas style={{ width: 300, height: 300 }}>
+  <Circle cx={150} cy={150} r={120}>
+    <SweepGradient
+      c={vec(150, 150)}
+      colors={['#0ff', '#f0f', '#ff0', '#0ff']}
+    />
+  </Circle>
+</Canvas>
+```
+
+### Image Filters — photobooth color effects
+
+```tsx
+import {
+  Canvas, Image, useImage,
+  ColorMatrix, ColorFilter,
+  Blur
+} from '@shopify/react-native-skia'
+
+function PhotoFilter({ uri }: { uri: string }) {
+  const image = useImage(uri)
+  if (!image) return null
+
+  // Color matrix: [R→R, G→R, B→R, A→R, bias, R→G, ...]
+  // Identity: [1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,1,0]
+  // Grayscale matrix:
+  const grayscale = [
+    0.21, 0.72, 0.07, 0, 0,
+    0.21, 0.72, 0.07, 0, 0,
+    0.21, 0.72, 0.07, 0, 0,
+    0,    0,    0,    1, 0,
+  ]
+
+  return (
+    <Canvas style={{ width: 300, height: 400 }}>
+      <Image image={image} x={0} y={0} width={300} height={400} fit="cover">
+        <ColorFilter matrix={grayscale} />
+      </Image>
+    </Canvas>
+  )
+}
+
+// Common color matrices:
+// Sepia: [0.393,0.769,0.189,0,0, 0.349,0.686,0.168,0,0, 0.272,0.534,0.131,0,0, 0,0,0,1,0]
+// Invert: [-1,0,0,0,1, 0,-1,0,0,1, 0,0,-1,0,1, 0,0,0,1,0]
+// High contrast (clamp in Skia): raise last column bias values
+```
+
+### Animated Gaussian Blur (reveal effect)
+
+```tsx
+import { Canvas, Image, useImage, Blur, useValue, useSharedValueEffect } from '@shopify/react-native-skia'
+import { useSharedValue, withTiming, Easing } from 'react-native-reanimated'
+import { useEffect } from 'react'
+
+function BlurReveal({ uri }: { uri: string }) {
+  const image = useImage(uri)
+
+  const blurAnimated = useSharedValue(20)   // starts blurred
+  const blurSkia     = useValue(20)
+
+  useSharedValueEffect(() => { blurSkia.current = blurAnimated.value }, blurAnimated)
+
+  useEffect(() => {
+    blurAnimated.value = withTiming(0, { duration: 800, easing: Easing.out(Easing.cubic) })
+  }, [])
+
+  if (!image) return null
+  return (
+    <Canvas style={{ width: 300, height: 400 }}>
+      <Image image={image} x={0} y={0} width={300} height={400} fit="cover">
+        <Blur blur={blurSkia} />
+      </Image>
+    </Canvas>
+  )
+}
+```
+
+### When to use Skia vs Reanimated
+
+| Task | Tool |
+|------|------|
+| Animated View transforms (scale, opacity, translate) | Reanimated `useAnimatedStyle` |
+| Blur effects, glow, image filters | Skia `BlurMask`, `Blur`, `ColorFilter` |
+| Custom shapes, gradients, canvas drawing | Skia `Canvas` |
+| SVG-like path animation | Skia `Path` with animated `Svg` or Reanimated paths |
+| Performance-critical list animations | Reanimated (Skia is heavier per item) |
+| Fullscreen creative visual effects | Skia |
+
+**`useImage` rules:**
+- Returns `null` until the image loads — always null-check before rendering
+- For local assets: `useImage(require('./asset.png'))`
+- For remote URIs: `useImage({ uri: url })` — loads async
+- For dynamic textures (webcam frames, video): use `Skia.MakeImageFromEncoded()` inside a `useFrame`-like loop
+
+---
+
+## Number & Counter Animation
+
+Animating numeric values — scores, counts, live stats, timers.
+
+### Framer Motion digit flip (web — `mode="popLayout"`)
+
+The canonical pattern: each digit is a separate element; `AnimatePresence mode="popLayout"` swaps them without layout shift.
+
+```tsx
+import { AnimatePresence, motion } from 'framer-motion'
+
+function AnimatedNumber({ value }: { value: number }) {
+  const digits = String(Math.abs(value)).split('')
+
+  return (
+    <span className="flex font-mono tabular-nums overflow-hidden">
+      <AnimatePresence mode="popLayout">
+        {digits.map((d, i) => (
+          <motion.span
+            key={`${i}-${d}`}           // key includes digit so changing same position still re-mounts
+            initial={{ y: '-100%', opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: '100%', opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+            style={{ display: 'inline-block' }}
+          >
+            {d}
+          </motion.span>
+        ))}
+      </AnimatePresence>
+    </span>
+  )
+}
+// Rule: use `tabular-nums` so digits don't cause layout shift when value changes width.
+// Direction: y: '-100%' → 0 → '100%' = count up. Reverse for count down.
+// For a score that only increments: enter from top (y: '-100%'), exit to bottom (y: '100%').
+```
+
+### Count-up animation (web — CSS `@property` + `@keyframes`)
+
+Zero JS for static counters that animate on enter:
+
+```css
+@property --n {
+  syntax: '<integer>';
+  initial-value: 0;
+  inherits: false;
+}
+
+.counter {
+  counter-reset: n var(--n);
+  animation: count-up 1.5s ease-out forwards;
+  font-variant-numeric: tabular-nums;
+}
+.counter::after { content: counter(n); }
+
+@keyframes count-up {
+  from { --n: 0; }
+  to   { --n: 1337; } /* replace with your target */
+}
+```
+
+`@property` with `syntax: '<integer>'` makes `--n` interpolate as a whole number, which CSS `counter()` reads correctly. Zero JS, zero library.
+
+### Reanimated count-up (React Native)
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedProps, withTiming, Easing,
+} from 'react-native-reanimated'
+import { Text } from 'react-native'
+
+const AnimatedText = Animated.createAnimatedComponent(Text)
+
+function CountUp({ to, duration = 1200 }: { to: number; duration?: number }) {
+  const count = useSharedValue(0)
+
+  useEffect(() => {
+    count.value = withTiming(to, { duration, easing: Easing.out(Easing.cubic) })
+  }, [to])
+
+  const animatedProps = useAnimatedProps(() => ({
+    text: String(Math.round(count.value)),
+    defaultValue: '0',
+  }))
+
+  return <AnimatedText animatedProps={animatedProps} style={styles.counter} />
+}
+// Note: animating `text` prop requires `react-native-reanimated` 3.1+ and
+// `@react-native-community/hooks` or similar — or use `useDerivedValue` + JS bridge.
+// Alternative: drive a shared value, read it in `useAnimatedReaction`, and
+// `runOnJS(setValue)(Math.round(count.value))` to update normal React state at 30fps.
+```
+
+**Simpler alternative — `useAnimatedReaction` at 30fps:**
+```tsx
+const count = useSharedValue(0)
+const [display, setDisplay] = useState(0)
+
+useAnimatedReaction(
+  () => Math.round(count.value),
+  (current, previous) => {
+    if (current !== previous) runOnJS(setDisplay)(current)
+  }
+)
+
+useEffect(() => {
+  count.value = withTiming(to, { duration: 1200, easing: Easing.out(Easing.cubic) })
+}, [to])
+
+// <Text>{display}</Text>
+```
+
+### Live-updating badge (AnimatePresence `mode="popLayout"`)
+
+```tsx
+// Notification count badge — numbers fly in/out
+function Badge({ count }: { count: number }) {
+  if (count === 0) return null
+  return (
+    <div className="relative h-5 min-w-5 overflow-hidden rounded-full bg-zinc-100 px-1">
+      <AnimatePresence mode="popLayout">
+        <motion.span
+          key={count}
+          initial={{ y: -16 }}
+          animate={{ y: 0 }}
+          exit={{ y: 16 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+          className="block font-mono text-xs text-zinc-900 tabular-nums leading-5 text-center"
+        >
+          {count > 99 ? '99+' : count}
+        </motion.span>
+      </AnimatePresence>
+    </div>
+  )
+}
+```
+
+Rules:
+- Use `tabular-nums` to prevent layout shift between single and double digit values
+- `overflow-hidden` on the container clips the entering/exiting digit
+- `mode="popLayout"` removes the exiting digit from layout flow immediately — no squishing
+- Clamp display at `99+` — anything higher is visually noisy
+
+---
+
+
 
 When building an animation, always:
 1. State which library/approach and why (one sentence)
