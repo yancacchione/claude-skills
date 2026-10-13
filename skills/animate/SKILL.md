@@ -6114,7 +6114,125 @@ Rules:
 
 ---
 
+## Expo Router Screen Transitions
 
+Expo Router v3+ delegates routing to React Navigation. Custom screen animations live on `<Stack.Screen>` — either as presets or full `transitionSpec` / `cardStyleInterpolator` overrides.
+
+### Built-in presets (zero config)
+
+```tsx
+// app/(stack)/_layout.tsx
+import { Stack } from 'expo-router'
+
+export default function Layout() {
+  return (
+    <Stack screenOptions={{ headerShown: false }}>
+      {/* Slide from bottom — good for modals, detail views */}
+      <Stack.Screen name="detail/[id]" options={{ animation: 'slide_from_bottom' }} />
+      {/* Slide from right — the standard push */}
+      <Stack.Screen name="profile"     options={{ animation: 'slide_from_right' }} />
+      {/* Fade — for tab-root swaps or splash → home */}
+      <Stack.Screen name="index"       options={{ animation: 'fade' }} />
+    </Stack>
+  )
+}
+```
+
+Available `animation` values: `'default'`, `'fade'`, `'fade_from_bottom'`, `'flip'`, `'simple_push'`, `'slide_from_bottom'`, `'slide_from_right'`, `'slide_from_left'`, `'none'`.
+
+### Custom spring transition (Reanimated 3 `TransitionPresets`)
+
+```tsx
+import { TransitionPresets } from '@react-navigation/stack'
+import { Stack } from 'expo-router'
+
+// Smooth spring push — apply globally or per-screen
+export default function Layout() {
+  return (
+    <Stack
+      screenOptions={{
+        headerShown: false,
+        ...TransitionPresets.SlideFromRightIOS,  // start from a preset
+        transitionSpec: {
+          open:  { animation: 'spring', config: { damping: 22, stiffness: 200, mass: 1, overshootClamping: false } },
+          close: { animation: 'spring', config: { damping: 22, stiffness: 200, mass: 1 } },
+        },
+      }}
+    />
+  )
+}
+```
+
+### `cancelAnimation` — cleanup on unmount
+
+Always cancel Reanimated animations tied to a component's lifecycle. Missing `cancelAnimation` on unmount leaks UI-thread work and can produce `null is not an object (evaluating 'sv.value')` crashes.
+
+```tsx
+import { useEffect } from 'react'
+import { cancelAnimation, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated'
+
+function PulsingDot() {
+  const opacity = useSharedValue(1)
+
+  useEffect(() => {
+    opacity.value = withRepeat(withTiming(0.3, { duration: 700 }), -1, true)
+    return () => cancelAnimation(opacity)   // ← always cancel repeating / infinite animations
+  }, [])
+
+  // ...
+}
+```
+
+Cancel before re-triggering too — when a prop changes mid-animation, cancel the current one first or the two animations fight:
+
+```tsx
+useEffect(() => {
+  cancelAnimation(scale)
+  scale.value = withSpring(isActive ? 1.08 : 1, { damping: 18 })
+}, [isActive])
+```
+
+### Shared element transitions between Expo Router screens
+
+Reanimated 3.6+ `useSharedTransition` (experimental) morphs named elements across navigation boundaries:
+
+```tsx
+// Source screen — list item
+import { useSharedTransition } from 'react-native-reanimated'
+
+function QuoteCard({ id, text }: { id: string; text: string }) {
+  const transition = useSharedTransition(`quote-card-${id}`)
+
+  return (
+    <Animated.View style={transition.style} sharedTransitionTag={`quote-card-${id}`}>
+      <Text>{text}</Text>
+    </Animated.View>
+  )
+}
+
+// Destination screen — detail view
+function QuoteDetail({ id, text }: { id: string; text: string }) {
+  return (
+    <Animated.View sharedTransitionTag={`quote-card-${id}`}>
+      <Text>{text}</Text>
+    </Animated.View>
+  )
+}
+```
+
+`sharedTransitionTag` is the key — matching tags on two screens triggers an automatic morph during navigation. The value must be unique per element and consistent across source and destination.
+
+Fallback when `useSharedTransition` is unavailable: use `layoutId` from Framer Motion on web, or `Animated.createAnimatedComponent` + manual interpolation driven by `useAnimatedScrollHandler`.
+
+| Pattern | Tool |
+|---------|------|
+| Simple push/pop | `animation` preset on `<Stack.Screen>` |
+| Spring physics on route change | `transitionSpec` with `{ animation: 'spring', config: {...} }` |
+| Hero element morph across screens | `sharedTransitionTag` (Reanimated 3.6+) |
+| Tab change animation | Custom `tabBarButton` + `withSpring` on press |
+| Cleanup infinite animations | `cancelAnimation` in `useEffect` return |
+
+---
 
 When building an animation, always:
 1. State which library/approach and why (one sentence)
