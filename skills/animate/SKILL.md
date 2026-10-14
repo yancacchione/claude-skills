@@ -6234,6 +6234,249 @@ Fallback when `useSharedTransition` is unavailable: use `layoutId` from Framer M
 
 ---
 
+## Moti (Expo / React Native — declarative shorthand)
+
+Moti wraps Reanimated 3 in a Framer Motion-style declarative API. Best for simple enter/exit/state animations where raw Reanimated shared-value boilerplate is overkill. Uses Reanimated under the hood — no performance difference, just less code.
+
+**Install:**
+```bash
+npx expo install moti
+```
+
+### Basic enter animation
+
+```tsx
+import { MotiView, MotiText } from 'moti'
+
+// Fade + slide up on mount
+<MotiView
+  from={{ opacity: 0, translateY: 12 }}
+  animate={{ opacity: 1, translateY: 0 }}
+  transition={{ type: 'spring', damping: 20, stiffness: 200 }}
+/>
+
+// Delay for stagger (manual)
+<MotiView
+  from={{ opacity: 0, scale: 0.95 }}
+  animate={{ opacity: 1, scale: 1 }}
+  transition={{ type: 'timing', duration: 300, delay: 100 }}
+/>
+```
+
+`from` sets the initial values (before mount). `animate` is the target. `transition` controls the curve — same object as Reanimated `withSpring` / `withTiming` config.
+
+### Exit animation with AnimatePresence
+
+```tsx
+import { MotiView, AnimatePresence } from 'moti'
+
+function Toast({ visible, message }: { visible: boolean; message: string }) {
+  return (
+    <AnimatePresence>
+      {visible && (
+        <MotiView
+          from={{ opacity: 0, translateY: -8 }}
+          animate={{ opacity: 1, translateY: 0 }}
+          exit={{ opacity: 0, translateY: -8 }}
+          exitTransition={{ type: 'timing', duration: 150 }}
+          transition={{ type: 'spring', damping: 20, stiffness: 300 }}
+        >
+          <Text>{message}</Text>
+        </MotiView>
+      )}
+    </AnimatePresence>
+  )
+}
+```
+
+`exit` and `exitTransition` are separate from `transition` — exit can use a faster `timing` while enter uses a spring.
+
+### State-driven animation (`animate` object changes)
+
+```tsx
+// Toggle between two states without a shared value
+function ExpandableCard({ expanded }: { expanded: boolean }) {
+  return (
+    <MotiView
+      animate={{
+        scale: expanded ? 1.02 : 1,
+        borderRadius: expanded ? 16 : 8,
+      }}
+      transition={{ type: 'spring', damping: 18 }}
+    />
+  )
+}
+```
+
+No `useSharedValue` needed — Moti diffs the `animate` object and animates the delta whenever it changes.
+
+### Staggered list with `stagger` helper
+
+```tsx
+import { MotiView } from 'moti'
+import { Stagger } from 'moti/interactions'
+
+// Built-in stagger helper — each child gets an incremental delay
+function QuoteList({ items }: { items: string[] }) {
+  return (
+    <Stagger stagger={60} initial={{ opacity: 0, translateY: 16 }}>
+      {items.map((item, i) => (
+        <MotiView key={i}>
+          <Text>{item}</Text>
+        </MotiView>
+      ))}
+    </Stagger>
+  )
+}
+```
+
+### Sequence animation (`useDynamicAnimation`)
+
+```tsx
+import { useDynamicAnimation, MotiView } from 'moti'
+
+function PressEffect() {
+  const animation = useDynamicAnimation(() => ({ scale: 1 }))
+
+  const handlePress = async () => {
+    animation.animateTo({ scale: 0.93 })
+    setTimeout(() => animation.animateTo({ scale: 1 }), 100)
+  }
+
+  return (
+    <MotiView state={animation} onTouchEnd={handlePress}>
+      {/* content */}
+    </MotiView>
+  )
+}
+```
+
+`useDynamicAnimation` gives imperative control without touching `useSharedValue` directly — good for sequential multi-step animations.
+
+### Looping animation
+
+```tsx
+// Pulse loop — breathing indicator, loading state
+<MotiView
+  from={{ opacity: 0.4, scale: 0.97 }}
+  animate={{ opacity: 1, scale: 1 }}
+  transition={{
+    type: 'timing',
+    duration: 900,
+    loop: true,          // loops back and forth
+    repeatReverse: true,
+  }}
+/>
+```
+
+### When Moti vs raw Reanimated
+
+| Use Moti | Use raw Reanimated |
+|----------|-------------------|
+| Simple enter/exit/state change | Gesture-driven animation (pan, pinch) |
+| Declarative "when prop changes, animate" | Complex scroll-linked values |
+| Fast prototyping | Multi-worklet coordination, `runOnJS` |
+| Staggered list enters | Bottom sheet, swipe-to-dismiss |
+| Looping ambient effects | `useAnimatedScrollHandler` |
+
+Rule: if the animation responds to direct touch/gesture input, always reach for Reanimated + Gesture Handler directly — Moti adds a layer that complicates worklet access. For everything else (state-driven, mount/unmount, ambient), Moti is faster to write.
+
+---
+
+## Haptic Feedback with Animation
+
+The tactile layer — pairing Expo Haptics with Reanimated springs gives apps a premium, physical feel. Sound design for touch.
+
+**Install:**
+```bash
+npx expo install expo-haptics
+```
+
+### The four haptic types
+
+```tsx
+import * as Haptics from 'expo-haptics'
+
+// Impact — for direct physical presses, snaps, and drag releases
+Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)   // subtle — hover states, selection
+Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium)  // standard — button taps, card picks
+Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy)   // emphatic — destructive, confirm
+
+// Notification — for outcomes (async results, state changes)
+Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success) // done, saved, approved
+Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error)   // failed, invalid
+Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning) // caution
+
+// Selection — for discrete picker/segmented-control steps
+Haptics.selectionAsync()  // one tick per incremental selection change
+```
+
+### Pairing haptics with spring animations
+
+Fire haptics at the **same moment** the visual animation peaks or settles — not at gesture start and not after. The timing is the feel.
+
+```tsx
+// Button tap — haptic fires with the press, not before
+const scale = useSharedValue(1)
+
+const press = Gesture.Tap()
+  .onBegin(() => {
+    scale.value = withSpring(0.94, { damping: 15 })
+    runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Light)
+  })
+  .onFinalize(() => {
+    scale.value = withSpring(1, { damping: 12 })
+  })
+```
+
+```tsx
+// Snap to position — haptic fires when it snaps, not when the drag ends
+const translateX = useSharedValue(0)
+
+const pan = Gesture.Pan()
+  .onUpdate((e) => { translateX.value = e.translationX })
+  .onEnd((e) => {
+    'worklet'
+    const snap = findNearestSnap(translateX.value)
+    translateX.value = withSpring(snap, { damping: 20, velocity: e.velocityX }, (finished) => {
+      if (finished) runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Medium)
+    })
+  })
+```
+
+The spring callback `(finished) => ...` fires after the spring settles — this is when the haptic is most satisfying for snaps.
+
+```tsx
+// Success confirmation — notification haptic + scale pulse
+async function onSave() {
+  await saveData()
+  Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+  scale.value = withSequence(
+    withSpring(1.04, { damping: 10 }),
+    withSpring(1,    { damping: 20 })
+  )
+}
+```
+
+```tsx
+// Selection tick — fires once per item as a picker scrolls
+const handleSelectionChange = (index: number) => {
+  Haptics.selectionAsync()
+  setSelectedIndex(index)
+}
+```
+
+### Rules
+
+- **iOS only** — Android haptics via `expo-haptics` are approximations. Always test on both; never build a core interaction that depends on haptic precision on Android.
+- **Never on looping animations** — do not fire haptics in `withRepeat` callbacks. Vibrating at 60fps harms the device and the user.
+- **One haptic per gesture, not per frame** — debounce selection ticks; fire snap haptics in the spring callback, not in `onUpdate`.
+- **Don't fire on programmatic animations** — haptics are for direct user-initiated interactions. Haptic on a timer-driven animation is confusing.
+- **Intensity ladder**: Light for hover/hover-lift, Medium for tap/snap, Heavy for destructive/long-press-confirm, Notification for async outcomes.
+- **Test without haptics**: `runOnJS(Haptics.impactAsync)` is the only haptic call allowed inside a worklet — wrap all haptic calls this way if inside a gesture handler.
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
