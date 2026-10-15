@@ -5949,6 +5949,147 @@ function BlurReveal({ uri }: { uri: string }) {
 }
 ```
 
+### Native Camera Pipeline — Skia Overlay Effects (photobooth)
+
+Two approaches depending on the Expo workflow:
+
+**Approach A — Overlay (Expo Go compatible, zero frame processing)**
+
+Draw Skia effects *on top of* the camera preview. No per-pixel processing — the live camera shows through underneath. Works for: grain, vignette, color tints, scanlines, text overlays, aura glow, glitch artifacts.
+
+```tsx
+import { CameraView, useCameraPermissions } from 'expo-camera'
+import { Canvas, Fill, rect, rrect } from '@shopify/react-native-skia'
+import { StyleSheet, View } from 'react-native'
+
+const { width: W, height: H } = Dimensions.get('window')
+
+function PhotoboothOverlay() {
+  const [permission, requestPermission] = useCameraPermissions()
+  const tick = useSharedValue(0)
+
+  // Drive animated overlay effects (grain, scanlines)
+  useFocusEffect(useCallback(() => {
+    tick.value = withRepeat(withTiming(1, { duration: 2000, easing: Easing.linear }), -1)
+    return () => cancelAnimation(tick)
+  }, []))
+
+  if (!permission?.granted) return <Pressable onPress={requestPermission}><Text>Allow camera</Text></Pressable>
+
+  return (
+    <View style={StyleSheet.absoluteFill}>
+      {/* Live camera preview underneath */}
+      <CameraView style={StyleSheet.absoluteFill} facing="front" />
+
+      {/* Skia canvas floats on top — pointer-events none so gestures pass through */}
+      <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
+        {/* Vignette — dark radial gradient at edges */}
+        <Fill>
+          <RadialGradient
+            c={{ x: W / 2, y: H / 2 }}
+            r={W * 0.8}
+            colors={['transparent', 'rgba(0,0,0,0.65)']}
+          />
+        </Fill>
+
+        {/* Animated scanlines — use a thin repeating rect loop or a Skia Path */}
+        {/* Color tint overlay */}
+        <Fill color="rgba(0,255,140,0.06)" />  {/* subtle phosphor green */}
+      </Canvas>
+    </View>
+  )
+}
+```
+
+Use this for 90% of photobooth effects — it's instant to set up and runs at full camera fps.
+
+**Approach B — Per-pixel frame processing (development build required)**
+
+For effects that need to read individual pixels (greenscreen keying, thermal, RGB split): use `react-native-vision-camera` with `useSkiaFrameProcessor`. This runs on the camera thread as a worklet — no JS bridge per frame.
+
+```bash
+npx expo install react-native-vision-camera
+npx expo install @shopify/react-native-skia
+```
+
+```tsx
+import { Camera, useCameraDevice } from 'react-native-vision-camera'
+import { useSkiaFrameProcessor } from 'react-native-vision-camera/src/skia'
+import { Skia } from '@shopify/react-native-skia'
+
+// Thermal color matrix (4×5, row = output R G B A, columns = input R G B A + offset)
+const THERMAL_MATRIX = Float32Array.from([
+  1.5, -0.5,  0,    0, 0,
+  0,    0.5, -0.5,  0, 0,
+ -0.5,  0,    1.5,  0, 0,
+  0,    0,    0,    1, 0,
+])
+
+function FrameProcessorCamera() {
+  const device = useCameraDevice('front')
+
+  const frameProcessor = useSkiaFrameProcessor((frame) => {
+    'worklet'
+    const paint = Skia.Paint()
+    paint.setColorFilter(
+      Skia.ColorFilter.MakeMatrix(THERMAL_MATRIX)
+    )
+    frame.render(paint)
+  }, [])
+
+  if (!device) return null
+  return (
+    <Camera
+      device={device}
+      isActive={true}
+      frameProcessor={frameProcessor}
+      style={StyleSheet.absoluteFill}
+    />
+  )
+}
+```
+
+Swap `THERMAL_MATRIX` for any 4×5 float array to get different photobooth looks:
+
+```ts
+// Grayscale
+const BW_MATRIX = Float32Array.from([
+  0.33, 0.33, 0.33, 0, 0,
+  0.33, 0.33, 0.33, 0, 0,
+  0.33, 0.33, 0.33, 0, 0,
+  0,    0,    0,    1, 0,
+])
+
+// Neon / channel-swapped
+const NEON_MATRIX = Float32Array.from([
+  0,   0,   1.2, 0, 0,
+  1.2, 0,   0,   0, 0,
+  0,   1.2, 0,   0, 0,
+  0,   0,   0,   1, 0,
+])
+
+// Surveillance / Matrix green tint
+const SURVEILLANCE_MATRIX = Float32Array.from([
+  0.2,  0.6, 0.2, 0, 0.05,
+  0.2,  0.8, 0.2, 0, 0.05,
+  0.2,  0.6, 0.2, 0, 0,
+  0,    0,   0,   1, 0,
+])
+```
+
+For greenscreen keying in the frame processor: implement the hue-distance mask in GLSL (already in the WebGL section) ported to a Skia `RuntimeEffect` shader — pass the key hue as a uniform.
+
+**Decision:**
+
+| | Overlay (Approach A) | Frame processor (Approach B) |
+|---|---|---|
+| Works in Expo Go | ✓ | ✗ (dev build only) |
+| Per-pixel effects | ✗ | ✓ |
+| Setup cost | Zero | ~30 min |
+| Use for | Grain, vignette, tints, aura, text overlays | Greenscreen, thermal, deep color effects |
+
+Start with Approach A. Add Approach B when the feature specifically needs to read pixel data.
+
 ### When to use Skia vs Reanimated
 
 | Task | Tool |
@@ -5959,6 +6100,8 @@ function BlurReveal({ uri }: { uri: string }) {
 | SVG-like path animation | Skia `Path` with animated `Svg` or Reanimated paths |
 | Performance-critical list animations | Reanimated (Skia is heavier per item) |
 | Fullscreen creative visual effects | Skia |
+| Real-time camera effects (per-pixel) | VisionCamera + `useSkiaFrameProcessor` |
+| Camera overlay (tint, grain, vignette) | expo-camera + Skia `Canvas` overlay |
 
 **`useImage` rules:**
 - Returns `null` until the image loads — always null-check before rendering
