@@ -6090,6 +6090,143 @@ For greenscreen keying in the frame processor: implement the hue-distance mask i
 
 Start with Approach A. Add Approach B when the feature specifically needs to read pixel data.
 
+### Skia `RuntimeEffect` — GLSL-like shaders on mobile
+
+`RuntimeEffect` lets you write GPU fragment shaders in SkSL (Google's GLSL dialect) that run directly inside a Skia `Canvas`. Same creative power as WebGL/GLSL — no JS bridge per frame, works on iOS and Android, composites into the native `Canvas` tree. The right tool for per-pixel photobooth effects, generative glows, and HSV color transforms when you're already in a `<Canvas>`.
+
+**SkSL vs GLSL cheat sheet:**
+
+| GLSL | SkSL |
+|------|------|
+| `vec2 uv = gl_FragCoord.xy / resolution;` | `float2 uv = xy / iResolution;` (xy is the entry point param) |
+| `vec4` / `vec3` / `vec2` | `half4` / `half3` / `float2` |
+| `void main() { gl_FragColor = col; }` | `half4 main(float2 xy) { return col; }` |
+| `texture2D(sampler, uv)` | `shader.eval(uv)` on a child shader input |
+| `uniform sampler2D` | Child shader passed via `<Shader>` children |
+| `uniform float uTime` | `uniform float iTime` (same syntax) |
+
+**Animated phosphor glow (bridge Reanimated → SkSL):**
+
+```tsx
+import { Skia, Canvas, Fill, Shader, useValue, useSharedValueEffect } from '@shopify/react-native-skia'
+import { useSharedValue, withRepeat, withTiming, Easing, cancelAnimation } from 'react-native-reanimated'
+import { useEffect } from 'react'
+
+const PHOSPHOR_GLOW = `
+  uniform float iTime;
+  uniform float2 iResolution;
+
+  half4 main(float2 xy) {
+    float2 uv = xy / iResolution;
+    float2 center = float2(0.5, 0.5);
+    float dist = length(uv - center);
+
+    float pulse = 0.5 + 0.5 * sin(iTime * 2.0);
+    float glow = smoothstep(0.65, 0.0, dist) * pulse;
+
+    // Phosphor terminal green
+    return half4(0.0, glow * 0.85, glow * 0.45, glow * 0.7);
+  }
+`
+
+// Always null-check — Make() returns null on SkSL compile error
+const glowEffect = Skia.RuntimeEffect.Make(PHOSPHOR_GLOW)
+
+function PhosphorGlowOverlay({ width, height }: { width: number; height: number }) {
+  if (!glowEffect) return null  // shader failed to compile — bail silently
+
+  const time = useSharedValue(0)
+  const skiaTime = useValue(0)  // Skia's own reactive ref
+
+  // Bridge Reanimated → Skia on the UI thread
+  useSharedValueEffect(() => {
+    skiaTime.current = time.value
+  }, time)
+
+  useEffect(() => {
+    time.value = withRepeat(withTiming(100, { duration: 100_000, easing: Easing.linear }), -1)
+    return () => cancelAnimation(time)
+  }, [])
+
+  return (
+    <Canvas style={{ width, height }} pointerEvents="none">
+      <Fill>
+        <Shader
+          source={glowEffect}
+          uniforms={{ iTime: skiaTime, iResolution: [width, height] }}
+        />
+      </Fill>
+    </Canvas>
+  )
+}
+```
+
+**Greenscreen chroma-key in SkSL (for `useSkiaFrameProcessor`):**
+
+Ports the WebGL greenscreen mask to SkSL. Runs as a worklet on the camera thread — no JS per frame.
+
+```tsx
+import { Skia } from '@shopify/react-native-skia'
+import { useSkiaFrameProcessor } from 'react-native-vision-camera'
+
+const CHROMAKEY_SKSL = `
+  uniform float keyHue;    // target hue in degrees (0–360)
+  uniform float tolerance; // hue tolerance in degrees (e.g. 30)
+  uniform shader frame;    // the camera frame as an input shader
+
+  // RGB → HSV hue in degrees (0–360)
+  float rgbHue(half3 c) {
+    float maxC = max(max(c.r, c.g), c.b);
+    float minC = min(min(c.r, c.g), c.b);
+    float delta = maxC - minC;
+    if (delta < 0.001) return 0.0;
+    float h = 0.0;
+    if (maxC == c.r)      h = mod((c.g - c.b) / delta, 6.0);
+    else if (maxC == c.g) h = (c.b - c.r) / delta + 2.0;
+    else                  h = (c.r - c.g) / delta + 4.0;
+    return h * 60.0;
+  }
+
+  half4 main(float2 xy) {
+    half4 px = frame.eval(xy);
+    float hue = rgbHue(px.rgb);
+    float hueDiff = abs(mod(hue - keyHue + 180.0, 360.0) - 180.0);
+    float mask = smoothstep(tolerance, tolerance * 0.5, hueDiff);  // 0=green, 1=keep
+    return half4(px.rgb * mask, mask);  // transparent where green
+  }
+`
+
+function GreenscreenCamera() {
+  const device = useCameraDevice('front')
+  const effect = useMemo(() => Skia.RuntimeEffect.Make(CHROMAKEY_SKSL)!, [])
+
+  const frameProcessor = useSkiaFrameProcessor((frame) => {
+    'worklet'
+    const uniforms = {
+      keyHue: 120.0,    // green hue in degrees
+      tolerance: 30.0,  // ±30° tolerance
+    }
+    // frame itself becomes the `frame` shader input — no extra setup needed
+    const paint = Skia.Paint()
+    paint.setShader(effect.makeShaderWithChildren(uniforms, [frame.makeShader()], true))
+    frame.render(paint)
+  }, [effect])
+
+  if (!device) return null
+  return <Camera device={device} isActive frameProcessor={frameProcessor} style={StyleSheet.absoluteFill} />
+}
+```
+
+**Rules:**
+- `Skia.RuntimeEffect.Make(sksl)` returns `null` on any SkSL syntax error — always null-check or assert. Log the error string with `Skia.RuntimeEffect.Make(sksl)?.getErrorText()` during development.
+- `float2` uniform takes `[number, number]`. `float` takes `number`. No `vec` types.
+- `half4 main(float2 xy)` — `xy` is pixel coordinates (not normalized). Divide by `iResolution` for UVs.
+- Skia `useValue` bridges to `uniforms` without React re-renders — keep `iTime` as a Skia value, not React state.
+- Compositing order: `<Shader>` inside `<Fill>` covers the whole canvas. Use `<Paint>` + `Shader` on a shape for selective application.
+- For camera frame processors: the frame becomes a child shader via `frame.makeShader()` — pass it as `children` to `makeShaderWithChildren`.
+
+---
+
 ### When to use Skia vs Reanimated
 
 | Task | Tool |
@@ -6102,6 +6239,7 @@ Start with Approach A. Add Approach B when the feature specifically needs to rea
 | Fullscreen creative visual effects | Skia |
 | Real-time camera effects (per-pixel) | VisionCamera + `useSkiaFrameProcessor` |
 | Camera overlay (tint, grain, vignette) | expo-camera + Skia `Canvas` overlay |
+| Per-pixel GPU shader (glow, chroma-key, color warp) | Skia `RuntimeEffect` + SkSL |
 
 **`useImage` rules:**
 - Returns `null` until the image loads — always null-check before rendering
