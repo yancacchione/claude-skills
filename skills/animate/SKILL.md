@@ -6758,6 +6758,265 @@ const handleSelectionChange = (index: number) => {
 
 ---
 
+## Animated Number Counter
+
+Rolling digit transitions for scores, stats, live data, countdowns. Three approaches for web and native.
+
+### Framer Motion (web) — `AnimatePresence mode="popLayout"`
+
+The right tool for a number that increments or decrements while another page handles the exit. `popLayout` removes the outgoing digit from layout immediately so the entering digit pops clean.
+
+```tsx
+import { AnimatePresence, motion } from 'framer-motion'
+
+function RollingNumber({ value }: { value: number }) {
+  return (
+    <div className="relative overflow-hidden h-8 w-12 font-mono tabular-nums">
+      <AnimatePresence mode="popLayout" initial={false}>
+        <motion.span
+          key={value}
+          initial={{ y: -20, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: 20, opacity: 0 }}
+          transition={{ duration: 0.2, ease: 'easeOut' }}
+          className="absolute inset-0 flex items-center justify-center"
+        >
+          {value}
+        </motion.span>
+      </AnimatePresence>
+    </div>
+  )
+}
+
+// Multi-digit: split the number and animate each digit independently
+function MultiDigitCounter({ value }: { value: number }) {
+  const digits = String(value).padStart(4, '0').split('')
+  return (
+    <div className="flex">
+      {digits.map((d, i) => (
+        <RollingNumber key={i} value={Number(d)} />
+      ))}
+    </div>
+  )
+}
+```
+
+Direction trick — roll up for increments, down for decrements:
+```tsx
+const prev = useRef(value)
+const direction = value > prev.current ? 1 : -1
+prev.current = value
+
+initial={{ y: direction * -20, opacity: 0 }}
+exit={{ y: direction * 20, opacity: 0 }}
+```
+
+### Reanimated 3 (Expo/RN) — `withTiming` + re-render via `runOnJS`
+
+For a number that animates from its old value to its new one (count-up):
+
+```tsx
+import Animated, { useSharedValue, useAnimatedProps, withTiming, Easing } from 'react-native-reanimated'
+import { TextInput } from 'react-native'
+
+const AnimatedTextInput = Animated.createAnimatedComponent(TextInput)
+
+function CountUp({ to, duration = 800 }: { to: number; duration?: number }) {
+  const animatedValue = useSharedValue(0)
+
+  useEffect(() => {
+    animatedValue.value = withTiming(to, {
+      duration,
+      easing: Easing.out(Easing.cubic),
+    })
+  }, [to])
+
+  const animatedProps = useAnimatedProps(() => ({
+    // TextInput value must be a string — format on the UI thread
+    text: String(Math.round(animatedValue.value)),
+  }))
+
+  return (
+    <AnimatedTextInput
+      animatedProps={animatedProps}
+      editable={false}
+      style={{ fontFamily: 'JetBrainsMono', fontSize: 32 }}
+    />
+  )
+}
+```
+
+For digit-roll (slot machine style) in RN, use `withSequence` + `withRepeat` to quickly cycle through characters before landing:
+
+```tsx
+// Digit slot: spins through 0–9 and lands on `target`
+function SlotDigit({ target }: { target: number }) {
+  const displayed = useSharedValue(0)
+
+  useEffect(() => {
+    // Overshoot to target + 10 (full extra rotation), land on target
+    displayed.value = withTiming(target + 10, {
+      duration: 600,
+      easing: Easing.out(Easing.cubic),
+    })
+  }, [target])
+
+  const style = useAnimatedStyle(() => ({
+    transform: [{ translateY: -(displayed.value % 10) * DIGIT_HEIGHT }],
+  }))
+
+  return (
+    <View style={{ height: DIGIT_HEIGHT, overflow: 'hidden' }}>
+      <Animated.View style={style}>
+        {[0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9].map((d, i) => (
+          <Text key={i} style={{ height: DIGIT_HEIGHT }}>{d}</Text>
+        ))}
+      </Animated.View>
+    </View>
+  )
+}
+const DIGIT_HEIGHT = 40
+```
+
+Rules:
+- `tabular-nums` (CSS) / `fontVariant: ['tabular-nums']` (RN) — prevents layout shift as digit widths vary
+- Always animate on score/stat changes from Supabase realtime — the visual confirmation reinforces the live update
+- For Motamo: pair a `notificationAsync(Success)` haptic with the counter increment at the same moment the spring settles
+
+---
+
+## Character Scramble / Terminal Text Reveal
+
+The phosphor/terminal aesthetic signature: characters cycle through random symbols before landing on their final value. Gives revealing text a cryptographic, decoded feeling.
+
+### Web (vanilla JS / React)
+
+```tsx
+import { useEffect, useRef, useState } from 'react'
+
+const CHARS = '!<>-_\\/[]{}—=+*^?#∫∑µ¬∆≈Ω∞0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+function useScramble(target: string, speed = 40) {
+  const [output, setOutput] = useState(target)
+  const iteration = useRef(0)
+  const raf = useRef<number>()
+
+  const scramble = () => {
+    iteration.current = 0
+
+    const step = () => {
+      setOutput(
+        target.split('').map((char, i) => {
+          if (i < iteration.current) return char  // revealed
+          if (char === ' ') return ' '
+          return CHARS[Math.floor(Math.random() * CHARS.length)]
+        }).join('')
+      )
+
+      if (iteration.current < target.length) {
+        iteration.current += 1 / 3  // fractional: reveals ~3 frames per character
+        raf.current = requestAnimationFrame(step)
+      }
+    }
+
+    raf.current = requestAnimationFrame(step)
+  }
+
+  useEffect(() => {
+    scramble()
+    return () => { if (raf.current) cancelAnimationFrame(raf.current) }
+  }, [target])
+
+  return { output, scramble }
+}
+
+// Usage
+function ScrambleText({ text }: { text: string }) {
+  const { output, scramble } = useScramble(text)
+  return (
+    <span
+      onMouseEnter={scramble}
+      className="font-mono cursor-pointer"
+      data-value={text}
+    >
+      {output}
+    </span>
+  )
+}
+```
+
+Variants:
+- **On mount**: pass `target` and let `useEffect` trigger on first render
+- **On hover**: expose `scramble` and bind to `onMouseEnter`
+- **On data load**: call `scramble()` when a new value arrives from Supabase
+- **Cascade**: call `scramble()` on each word with staggered `setTimeout(n * 80ms)`
+
+### React Native (Reanimated-compatible)
+
+In RN there's no `requestAnimationFrame` on the UI thread — drive the reveal with `setInterval` instead:
+
+```tsx
+import { useState, useEffect, useRef } from 'react'
+import { Text } from 'react-native'
+
+const CHARS = '!<>-_[]{}=+*?#0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+function ScrambleText({ target, delay = 0 }: { target: string; delay?: number }) {
+  const [output, setOutput] = useState(target)
+  const progressRef = useRef(0)
+
+  useEffect(() => {
+    progressRef.current = 0
+    const timer = setTimeout(() => {
+      const interval = setInterval(() => {
+        setOutput(
+          target.split('').map((char, i) => {
+            if (i < progressRef.current) return char
+            if (char === ' ') return ' '
+            return CHARS[Math.floor(Math.random() * CHARS.length)]
+          }).join('')
+        )
+        progressRef.current += 0.4
+        if (progressRef.current >= target.length) clearInterval(interval)
+      }, 30)
+      return () => clearInterval(interval)
+    }, delay)
+    return () => clearTimeout(timer)
+  }, [target, delay])
+
+  return (
+    <Text style={{ fontFamily: 'JetBrainsMono', letterSpacing: 1 }}>
+      {output}
+    </Text>
+  )
+}
+```
+
+### JetBrains Mono weight pulse during scramble
+
+Pair the scramble with a font-weight animation so the text "resolves" visually as characters lock in:
+
+```tsx
+// Web: animate font-variation-settings as characters reveal
+const [wght, setWght] = useState(200)
+
+useEffect(() => {
+  // Starts thin (200), resolves to regular (400) as reveal completes
+  const t = setTimeout(() => setWght(400), target.length * (1000 / 3 / speed))
+  return () => clearTimeout(t)
+}, [target])
+
+style={{ fontVariationSettings: `'wght' ${wght}`, transition: 'font-variation-settings 400ms ease-out' }}
+```
+
+Rules:
+- Cap at ~3 characters per frame or the scramble reads as noise instead of decoding
+- `data-value={text}` on the element allows a CSS `::after` trick for showing the final value on print/accessibility
+- Never scramble more than ~40 characters — at that length it becomes noise, not a reveal
+- For ambient / idle scrambles (screensaver-style), use a lower speed (60ms per step) and loop: after fully revealing, immediately scramble again
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
