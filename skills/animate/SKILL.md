@@ -7017,6 +7017,297 @@ Rules:
 
 ---
 
+## Pull-to-Refresh (Reanimated 3 — custom indicator)
+
+The RN core `onRefresh` prop on `FlatList`/`ScrollView` works but gives you no animation control. When you want a custom indicator (spinner replacement, phosphor-aesthetic, branded) use Reanimated + Gesture Handler directly.
+
+```tsx
+import { useSharedValue, useAnimatedStyle, withSpring, interpolate, runOnJS } from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import * as Haptics from 'expo-haptics'
+import Animated from 'react-native-reanimated'
+
+const THRESHOLD = 80   // px of pull to trigger refresh
+const MAX_PULL = 120   // clamp beyond this
+
+function PullToRefresh({ onRefresh, children }: { onRefresh: () => Promise<void>; children: React.ReactNode }) {
+  const pullY = useSharedValue(0)
+  const refreshing = useSharedValue(false)
+  const thresholdCrossed = useSharedValue(false)
+
+  const triggerHaptic = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium)
+
+  const pan = Gesture.Pan()
+    .onUpdate((e) => {
+      if (refreshing.value) return
+      if (e.translationY < 0) return  // ignore upward scroll
+      const clamped = Math.min(e.translationY, MAX_PULL)
+      pullY.value = clamped
+      if (clamped >= THRESHOLD && !thresholdCrossed.value) {
+        thresholdCrossed.value = true
+        runOnJS(triggerHaptic)()
+      } else if (clamped < THRESHOLD) {
+        thresholdCrossed.value = false
+      }
+    })
+    .onEnd(() => {
+      if (pullY.value >= THRESHOLD && !refreshing.value) {
+        refreshing.value = true
+        pullY.value = withSpring(THRESHOLD, { damping: 20, stiffness: 200 })
+        runOnJS(onRefresh)().then(() => {
+          refreshing.value = false
+          pullY.value = withSpring(0, { damping: 20, stiffness: 300 })
+          thresholdCrossed.value = false
+        })
+      } else {
+        pullY.value = withSpring(0, { damping: 20, stiffness: 300 })
+        thresholdCrossed.value = false
+      }
+    })
+
+  const contentStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: pullY.value }],
+  }))
+
+  const indicatorStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(pullY.value, [0, THRESHOLD], [0, 1]),
+    transform: [{ scale: interpolate(pullY.value, [0, THRESHOLD], [0.6, 1]) }],
+  }))
+
+  return (
+    <GestureDetector gesture={pan}>
+      <View style={{ flex: 1 }}>
+        {/* Indicator sits behind content, revealed by translateY */}
+        <Animated.View style={[{ position: 'absolute', top: 12, alignSelf: 'center', zIndex: 1 }, indicatorStyle]}>
+          <RefreshIndicator refreshing={refreshing} threshold={THRESHOLD} pullY={pullY} />
+        </Animated.View>
+        <Animated.View style={contentStyle}>
+          {children}
+        </Animated.View>
+      </View>
+    </GestureDetector>
+  )
+}
+```
+
+Minimalist indicator — a rotating phosphor-style spinner that spins once threshold is crossed:
+
+```tsx
+function RefreshIndicator({ refreshing, pullY, threshold }: { refreshing: SharedValue<boolean>; pullY: SharedValue<number>; threshold: number }) {
+  const rotate = useDerivedValue(() =>
+    refreshing.value
+      ? withRepeat(withTiming(360, { duration: 800, easing: Easing.linear }), -1, false)
+      : interpolate(pullY.value, [0, threshold], [0, 270])
+  )
+  const style = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${rotate.value}deg` }],
+  }))
+  return (
+    <Animated.View style={[{ width: 20, height: 20, borderWidth: 2, borderColor: '#fff', borderTopColor: 'transparent', borderRadius: 10 }, style]} />
+  )
+}
+```
+
+Rules:
+- `if (e.translationY < 0) return` — let the native scroll handle upward motion; only intercept downward pull at top
+- The `onRefresh` callback must return a `Promise` so the indicator knows when to snap back
+- Keep `MAX_PULL` at 1.5× `THRESHOLD` — more than that and the elastic feel breaks
+- For FlatList: wrap just the content, not the entire FlatList — or use `scrollEventThrottle={1}` + `onScroll` to disable PTR when not at top
+
+---
+
+## Onboarding / First-run Flow (Expo Router)
+
+For an app going to TestFlight: a polished onboarding walk-through that shows once and redirects to the app on completion. Direct from the `(auth)` group pattern in Expo Router.
+
+### Gate: show once with AsyncStorage
+
+```tsx
+// app/_layout.tsx or app/(auth)/_layout.tsx
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import { useRouter } from 'expo-router'
+
+export function useOnboardingGate() {
+  const router = useRouter()
+
+  useEffect(() => {
+    AsyncStorage.getItem('onboarding_complete').then((done) => {
+      if (done) router.replace('/(tabs)')
+    })
+  }, [])
+}
+
+export async function completeOnboarding() {
+  await AsyncStorage.setItem('onboarding_complete', 'true')
+}
+```
+
+### Horizontal pager with animated dot indicators
+
+```tsx
+import { FlatList, Dimensions } from 'react-native'
+import Animated, { useSharedValue, useAnimatedScrollHandler, interpolate, useAnimatedStyle } from 'react-native-reanimated'
+
+const { width: SCREEN_W } = Dimensions.get('window')
+const AnimatedFlatList = Animated.createAnimatedComponent(FlatList<OnboardingSlide>)
+
+const SLIDES: OnboardingSlide[] = [
+  { key: 'welcome', title: 'Welcome to Motamo', body: 'Your reading, reflected.' },
+  { key: 'collect', title: 'Collect what moves you', body: 'Save quotes from anywhere.' },
+  { key: 'revisit', title: 'Revisit what matters', body: 'Your library, at a glance.' },
+]
+
+function OnboardingScreen() {
+  const scrollX = useSharedValue(0)
+
+  const scrollHandler = useAnimatedScrollHandler((e) => {
+    scrollX.value = e.contentOffset.x
+  })
+
+  return (
+    <View style={{ flex: 1, backgroundColor: '#0a0a0a' }}>
+      <AnimatedFlatList
+        data={SLIDES}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        onScroll={scrollHandler}
+        scrollEventThrottle={16}
+        renderItem={({ item, index }) => (
+          <SlideView item={item} index={index} scrollX={scrollX} />
+        )}
+        keyExtractor={(s) => s.key}
+      />
+
+      {/* Dot indicators */}
+      <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 8, paddingBottom: 32 }}>
+        {SLIDES.map((_, i) => (
+          <DotIndicator key={i} index={i} scrollX={scrollX} total={SLIDES.length} />
+        ))}
+      </View>
+
+      {/* Get started — fades in on last slide */}
+      <GetStartedButton scrollX={scrollX} total={SLIDES.length} />
+    </View>
+  )
+}
+
+function DotIndicator({ index, scrollX, total }: { index: number; scrollX: SharedValue<number>; total: number }) {
+  const style = useAnimatedStyle(() => {
+    const inputRange = [(index - 1) * SCREEN_W, index * SCREEN_W, (index + 1) * SCREEN_W]
+    return {
+      width: interpolate(scrollX.value, inputRange, [6, 20, 6], 'clamp'),
+      opacity: interpolate(scrollX.value, inputRange, [0.3, 1, 0.3], 'clamp'),
+    }
+  })
+  return <Animated.View style={[{ height: 6, borderRadius: 3, backgroundColor: '#fff' }, style]} />
+}
+
+function GetStartedButton({ scrollX, total }: { scrollX: SharedValue<number>; total: number }) {
+  const router = useRouter()
+  const style = useAnimatedStyle(() => ({
+    opacity: interpolate(scrollX.value, [(total - 2) * SCREEN_W, (total - 1) * SCREEN_W], [0, 1], 'clamp'),
+    transform: [{ translateY: interpolate(scrollX.value, [(total - 2) * SCREEN_W, (total - 1) * SCREEN_W], [12, 0], 'clamp') }],
+  }))
+  return (
+    <Animated.View style={[{ paddingHorizontal: 24, paddingBottom: 48 }, style]}>
+      <Pressable
+        onPress={async () => { await completeOnboarding(); router.replace('/(tabs)') }}
+        style={{ backgroundColor: '#fff', borderRadius: 12, padding: 16, alignItems: 'center' }}
+      >
+        <Text style={{ fontFamily: 'JetBrainsMono', fontWeight: '700', color: '#0a0a0a' }}>Get Started</Text>
+      </Pressable>
+    </Animated.View>
+  )
+}
+```
+
+### Slide entrance animation
+
+Each slide animates in as you swipe to it:
+
+```tsx
+function SlideView({ item, index, scrollX }: { item: OnboardingSlide; index: number; scrollX: SharedValue<number> }) {
+  const style = useAnimatedStyle(() => {
+    const inputRange = [(index - 1) * SCREEN_W, index * SCREEN_W, (index + 1) * SCREEN_W]
+    return {
+      opacity: interpolate(scrollX.value, inputRange, [0.4, 1, 0.4], 'clamp'),
+      transform: [
+        { translateX: interpolate(scrollX.value, inputRange, [SCREEN_W * 0.15, 0, -SCREEN_W * 0.15], 'clamp') },
+      ],
+    }
+  })
+
+  return (
+    <View style={{ width: SCREEN_W, flex: 1, justifyContent: 'center', paddingHorizontal: 32 }}>
+      <Animated.View style={style}>
+        <Text style={{ fontFamily: 'JetBrainsMono', fontSize: 28, fontWeight: '700', color: '#fff', marginBottom: 16 }}>
+          {item.title}
+        </Text>
+        <Text style={{ fontFamily: 'JetBrainsMono', fontSize: 16, color: '#aaa', lineHeight: 24 }}>
+          {item.body}
+        </Text>
+      </Animated.View>
+    </View>
+  )
+}
+```
+
+### Permission request screen (camera or notifications)
+
+Slot this as an extra slide or a dedicated screen before `completeOnboarding()`:
+
+```tsx
+import { Camera } from 'expo-camera'
+import * as Notifications from 'expo-notifications'
+
+function PermissionSlide({ onGranted, onSkipped }: { onGranted: () => void; onSkipped: () => void }) {
+  const [status, setStatus] = useState<'idle' | 'asking' | 'granted' | 'denied'>('idle')
+
+  const requestCamera = async () => {
+    setStatus('asking')
+    const { status } = await Camera.requestCameraPermissionsAsync()
+    setStatus(status === 'granted' ? 'granted' : 'denied')
+    if (status === 'granted') setTimeout(onGranted, 400)  // brief moment to show success state
+  }
+
+  // Animate the icon based on status
+  const scale = useSharedValue(1)
+  useEffect(() => {
+    if (status === 'granted') {
+      scale.value = withSpring(1.2, { damping: 10, stiffness: 400 }, () => {
+        scale.value = withSpring(1)
+      })
+    }
+  }, [status])
+
+  const iconStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }))
+
+  return (
+    <View style={{ width: SCREEN_W, flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32 }}>
+      <Animated.View style={[{ marginBottom: 32 }, iconStyle]}>
+        <CameraIcon size={64} color={status === 'granted' ? '#4ade80' : '#fff'} />
+      </Animated.View>
+      <Text style={styles.title}>Enable Camera</Text>
+      <Text style={styles.body}>Used for the photobooth and profile photos.</Text>
+      <Pressable onPress={requestCamera} style={styles.primaryBtn}>
+        <Text style={styles.btnLabel}>{status === 'asking' ? '…' : 'Allow Camera'}</Text>
+      </Pressable>
+      <Pressable onPress={onSkipped}><Text style={styles.skipLabel}>Not now</Text></Pressable>
+    </View>
+  )
+}
+```
+
+Rules:
+- Mark onboarding complete **before** navigating — if navigation fails, you don't want a loop
+- Use `pagingEnabled` + `FlatList` over a manual `Animated.Value` pager — easier to maintain and composited by the native scroller
+- The `interpolate` for dots and slide opacity uses `'clamp'` to prevent overshooting on first/last slide
+- Skip button: always offer it; removing friction is more important than completion rate at the MVP stage
+- For Expo Router: put onboarding at `app/onboarding.tsx` and redirect from the root layout before the tabs mount; don't nest it inside the tab navigator
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
