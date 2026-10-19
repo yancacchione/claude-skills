@@ -342,6 +342,56 @@ When to use CSS `spring()` vs Framer Motion spring:
 - **Framer Motion spring**: needs `AnimatePresence`, `layoutId`, gesture-driven motion, or JS-readable values
 - **Reanimated `withSpring`**: React Native / Expo (CSS is not available there)
 
+**`linear()` easing — custom multi-stop curves, no JS:**
+
+The CSS `linear()` function builds a piecewise-linear easing through any number of stops. Unlike `cubic-bezier` (4 points max), `linear()` can describe spring physics, bounce curves, or slow-in/fast-out progressions that need more resolution. Supported in Chrome 113+, Firefox 112+, Safari 17.2+.
+
+```css
+/* Bouncy entrance — spring physics baked into a static curve */
+@keyframes bounce-in {
+  from { transform: scale(0.7); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+.card {
+  animation: bounce-in 600ms linear(
+    0, 0.009, 0.035 2.1%, 0.141 4.4%, 0.723 12.4%,
+    0.938 16%, 1.017, 1.077, 1.121, 1.149 24.3%,
+    1.159, 1.163 27%, 1.148 29.3%, 1.018 35.5%,
+    0.951, 0.930 41%, 0.910 43%, 0.932 48.7%,
+    1.007 53.4%, 1.017, 1.019, 1.013 61.3%, 1.003 65.4%,
+    0.997 69.5%, 1
+  ) both;
+}
+
+/* Smooth ease-out with more character than cubic-bezier */
+.hero-text {
+  animation: slide-up 400ms linear(
+    0, 0.005 2%, 0.02 4%, 0.044 6%, 0.072 8%,
+    0.198 14%, 0.347 20%, 0.61 32%, 0.82 44%,
+    0.937 58%, 1
+  ) both;
+}
+
+/* Use as a transition timing function too */
+.btn {
+  transition: transform 300ms linear(0, 0.5 35%, 1);
+}
+```
+
+Don't write `linear()` stops by hand — use the DevTools Easing Editor or [linear-easing-generator.netlify.app](https://linear-easing-generator.netlify.app) to convert a spring/bounce spec to the stop list.
+
+`linear()` vs CSS `spring()`:
+- `spring()`: physics-based, auto-calculates duration. Best for interactive hover/toggle states.
+- `linear()`: fixed duration, baked stops. Best for enter animations where you control the exact timing.
+
+`@supports` fallback for older Safari:
+```css
+.card { animation: bounce-in 400ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+@supports (animation-timing-function: linear(0, 1)) {
+  .card { animation: bounce-in 600ms linear(0, 0.009, 0.035 2.1%, /* ... */ 1) both; }
+}
+```
+
 **`@starting-style` — animate elements entering from `display:none` without any JS:**
 
 Supported in Chrome 117+, Safari 17.5+, Firefox 129+. The correct way to animate dialogs, popovers, and conditionally-rendered elements without Framer Motion's AnimatePresence.
@@ -1205,6 +1255,44 @@ lenis?.scrollTo(0, { immediate: true })                   // instant jump (route
 - GSAP ScrollTrigger `pin` — Lenis scroll position and GSAP's pin conflict. If using pinned sections, use GSAP ScrollSmoother instead of Lenis.
 - `scroll-snap-type: mandatory` containers (use `data-lenis-prevent`).
 - `position: sticky` on Safari with Lenis `syncTouch: true` — leave touch native.
+
+**`LazyMotion` — reduce the Framer Motion bundle in Next.js:**
+
+The default `motion.*` import includes everything (~35KB gzip). For production Next.js, use `LazyMotion` + the `m` primitive to ship only what the page needs.
+
+```tsx
+// app/layout-client.tsx — wrap the app once
+'use client'
+import { LazyMotion, m } from 'framer-motion'
+
+// Async-load features for the smallest possible initial JS
+const loadFeatures = () => import('framer-motion').then(r => r.domAnimation)
+
+export function MotionProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <LazyMotion features={loadFeatures} strict>
+      {children}
+    </LazyMotion>
+  )
+}
+// strict: throws in dev if motion.div is imported instead of m.div — prevents accidental full-bundle imports
+```
+
+```tsx
+// In components: m.div instead of motion.div (drop-in replacement)
+import { m } from 'framer-motion'
+import { AnimatePresence } from 'framer-motion'  // AnimatePresence stays a normal import
+
+<m.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }} />
+```
+
+| Import | Gzip | Includes |
+|--------|------|---------|
+| `motion.div` (no LazyMotion) | ~35KB | everything |
+| `m.div` + `domAnimation` | ~18KB | transitions, keyframes, gestures, scroll |
+| `m.div` + `domMax` | ~27KB | + layout animations, `layoutId`, drag |
+
+Key rule: **`layoutId` requires `domMax`** — it's excluded from `domAnimation`. If you use shared-element morphs, use `domMax` instead.
 
 ---
 
