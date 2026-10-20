@@ -7396,6 +7396,284 @@ Rules:
 
 ---
 
+## `useAnimatedKeyboard` — Keyboard-Aware Layout (Reanimated 3)
+
+The keyboard appearing and disappearing is one of the most commonly botched transitions in React Native apps. `KeyboardAvoidingView` works but gives no animation control. `useAnimatedKeyboard` from Reanimated 3 exposes keyboard height and state as shared values, enabling spring-quality animated layout shifts on the UI thread — no JS bridge, no jank.
+
+```tsx
+import Animated, {
+  useAnimatedKeyboard,
+  useAnimatedStyle,
+  KeyboardState,
+  withSpring,
+} from 'react-native-reanimated'
+import { TextInput, View, Pressable, Text } from 'react-native'
+
+// Bottom comment/chat input that slides up with the keyboard
+function BottomInputBar() {
+  const keyboard = useAnimatedKeyboard()
+
+  const containerStyle = useAnimatedStyle(() => ({
+    // Lift the bar by exactly the keyboard height — no jank, no spring overshoot on keyboard
+    transform: [{ translateY: -keyboard.height.value }],
+  }))
+
+  return (
+    <Animated.View style={[{
+      position: 'absolute',
+      bottom: 0,
+      left: 0,
+      right: 0,
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+      backgroundColor: '#0a0a0a',
+      borderTopWidth: 1,
+      borderTopColor: '#27272a',
+    }, containerStyle]}>
+      <TextInput
+        placeholder="Add a comment…"
+        placeholderTextColor="#71717a"
+        style={{ flex: 1, fontFamily: 'JetBrainsMono', color: '#fff' }}
+      />
+      <SendButton />
+    </Animated.View>
+  )
+}
+```
+
+### Reading keyboard state for conditional behavior
+
+```tsx
+import { useAnimatedKeyboard, KeyboardState, useDerivedValue } from 'react-native-reanimated'
+
+function KeyboardAwareSheet() {
+  const keyboard = useAnimatedKeyboard()
+
+  // Derived: is keyboard fully open?
+  const isKeyboardOpen = useDerivedValue(() =>
+    keyboard.state.value === KeyboardState.OPEN
+  )
+
+  // Expand the sheet height when keyboard is open (chat-style)
+  const sheetStyle = useAnimatedStyle(() => ({
+    height: isKeyboardOpen.value
+      ? SHEET_HEIGHT_EXPANDED
+      : SHEET_HEIGHT_DEFAULT,
+    // The translateY keeps the sheet above the keyboard
+    transform: [{ translateY: -keyboard.height.value }],
+  }))
+
+  return <Animated.View style={sheetStyle}>{/* content */}</Animated.View>
+}
+```
+
+### Full pattern: comment input with safe area
+
+```tsx
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import Animated, { useAnimatedKeyboard, useAnimatedStyle } from 'react-native-reanimated'
+
+function CommentInput({ onSubmit }: { onSubmit: (text: string) => void }) {
+  const insets = useSafeAreaInsets()
+  const keyboard = useAnimatedKeyboard()
+  const [text, setText] = useState('')
+
+  // Bottom padding = max(keyboard height, safe area bottom)
+  // Without this: bar buries under home indicator when keyboard closes
+  const wrapperStyle = useAnimatedStyle(() => ({
+    paddingBottom: Math.max(keyboard.height.value, insets.bottom),
+  }))
+
+  return (
+    <Animated.View style={[styles.inputWrapper, wrapperStyle]}>
+      <TextInput
+        value={text}
+        onChangeText={setText}
+        returnKeyType="send"
+        onSubmitEditing={() => { onSubmit(text); setText('') }}
+        style={styles.input}
+      />
+      <Pressable onPress={() => { onSubmit(text); setText('') }}>
+        <Text style={styles.sendLabel}>Send</Text>
+      </Pressable>
+    </Animated.View>
+  )
+}
+```
+
+### `useAnimatedKeyboard` vs `KeyboardAvoidingView`
+
+| | `useAnimatedKeyboard` | `KeyboardAvoidingView` |
+|---|---|---|
+| Thread | UI thread — no bridge | JS thread (causes jank) |
+| Customization | Full — spring, spring callbacks, derived values | None — height offset only |
+| Safe area | Manual (+ `useSafeAreaInsets`) | Handled by `behavior="padding"` |
+| Android | Works with `android:windowSoftInputMode="adjustResize"` in app.json | Same requirement |
+| When to use | Custom sheets, chat inputs, form slides | Quick fixes and non-animated layouts |
+
+Rules:
+- On Android, set `"softwareKeyboardLayoutMode": "resize"` in `app.json` under `expo.android` — without this, `keyboard.height` stays 0.
+- Never add `KeyboardAvoidingView` and `useAnimatedKeyboard` together — they fight each other.
+- `keyboard.height.value` is `0` when the keyboard is closed. Do not hardcode a fallback — `Math.max(keyboard.height.value, insets.bottom)` handles both states correctly.
+- `KeyboardState` enum: `CLOSED = 0`, `OPEN = 1`, `OPENING = 2`, `CLOSING = 3` — useful for driving appearance/disappearance transitions.
+- For forms mid-screen (not bottom-fixed): use `KeyboardAvoidingView behavior="position"` — it's cleaner than manually translating every field.
+
+---
+
+## CSS `@starting-style` — Enter Animations for DOM-Mounted Elements
+
+Before `@starting-style`, animating an element's entry required JavaScript to detect mount or toggle a class. Now CSS handles it natively: declare the element's *from* state inside `@starting-style`, pair it with a `transition`, and the browser plays the enter animation when the element is inserted into the DOM or transitions from `display: none` to visible.
+
+Chrome 117+, Firefox 129+, Safari 17.5+. Fully supported as of mid-2024.
+
+### Basic: dialog enter + exit
+
+```css
+/* The dialog transitions both ways */
+dialog[open] {
+  opacity: 1;
+  translate: 0 0;
+  transition:
+    opacity 0.25s ease-out,
+    translate 0.25s ease-out,
+    display 0.25s allow-discrete,   /* required for display:none ↔ block transition */
+    overlay 0.25s allow-discrete;   /* keeps it in top-layer during exit */
+}
+
+/* Exit: target the closed state */
+dialog:not([open]) {
+  opacity: 0;
+  translate: 0 8px;
+}
+
+/* Enter: the "from" state before the first frame */
+@starting-style {
+  dialog[open] {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}
+```
+
+### Popover API enter/exit
+
+The [Popover API](https://developer.mozilla.org/en-US/docs/Web/API/Popover_API) shows/hides elements with `popover` attribute and `popovertarget`. `@starting-style` pairs naturally:
+
+```css
+[popover] {
+  opacity: 0;
+  scale: 0.96;
+  translate: 0 4px;
+  transition:
+    opacity 0.2s ease-out,
+    scale 0.2s ease-out,
+    translate 0.2s ease-out,
+    display 0.2s allow-discrete,
+    overlay 0.2s allow-discrete;
+}
+
+[popover]:popover-open {
+  opacity: 1;
+  scale: 1;
+  translate: 0 0;
+}
+
+@starting-style {
+  [popover]:popover-open {
+    opacity: 0;
+    scale: 0.96;
+    translate: 0 4px;
+  }
+}
+```
+
+```html
+<button popovertarget="menu">Open</button>
+<div id="menu" popover><!-- menu content --></div>
+```
+
+### React: animating on mount without AnimatePresence
+
+For elements that mount once and stay (notifications, toasts, banners) — no need for Framer Motion:
+
+```tsx
+// Just add to the DOM — CSS handles the enter animation automatically
+function Toast({ message }: { message: string }) {
+  return (
+    <div className="toast">
+      {message}
+    </div>
+  )
+}
+```
+
+```css
+.toast {
+  opacity: 1;
+  translate: 0 0;
+  transition: opacity 0.3s ease-out, translate 0.3s ease-out;
+}
+
+@starting-style {
+  .toast {
+    opacity: 0;
+    translate: 0 -8px;
+  }
+}
+```
+
+### Next.js / React 18+ use case: route segment enter
+
+Each `page.tsx` that mounts on navigation fires `@starting-style` automatically — the segment enters animated without any Framer Motion wrapper:
+
+```css
+/* app/globals.css */
+main {
+  opacity: 1;
+  transition: opacity 0.25s ease-out;
+}
+
+@starting-style {
+  main {
+    opacity: 0;
+  }
+}
+```
+
+### `transition-behavior: allow-discrete`
+
+Required for animating discrete properties (`display`, `visibility`, `overlay`, `content-visibility`). Without it, `display: none` flips instantly and the exit animation never plays.
+
+```css
+.panel {
+  transition:
+    opacity 0.2s,
+    display 0.2s allow-discrete;   /* allow-discrete enables the display transition */
+}
+```
+
+### Decision: `@starting-style` vs Framer Motion AnimatePresence
+
+| Scenario | Use |
+|---|---|
+| Static element added once (toast, notice, skeleton) | `@starting-style` — zero JS |
+| Conditional React component mount/unmount | AnimatePresence — JS state drives it |
+| Native dialog / Popover API | `@starting-style` — CSS-native, no JS |
+| Complex orchestration (stagger, sequence, spring) | Framer Motion |
+| Next.js route segment enter | `@starting-style` on `main` — simplest approach |
+| Exit animation on unmount | AnimatePresence — `@starting-style` only handles enter |
+
+Rules:
+- `@starting-style` handles **enter only** — for exit, target the non-open/non-visible state (e.g. `dialog:not([open])`) or pair with AnimatePresence.
+- `allow-discrete` is needed for `display` and `overlay` — without it, transitions on those properties are ignored.
+- `overlay` keeps the element in the [top layer](https://developer.mozilla.org/en-US/docs/Glossary/Top_layer) during exit, preventing it from disappearing under other content before the transition finishes.
+- Combine with `@supports` for older Safari: `@supports (transition-behavior: allow-discrete) { ... }` — fall back to instant show/hide.
+- `@starting-style` works on any CSS change, not just DOM insertion — it also fires when `display: none` is removed, or when a class toggles the element visible.
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
