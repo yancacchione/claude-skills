@@ -7674,6 +7674,340 @@ Rules:
 
 ---
 
+## View Transitions API — Native Cross-Document & SPA Morphs (Web)
+
+The browser's own cross-document transition and element-morph system. Chrome 111+ (March 2023), Firefox 131+ (October 2024), Safari 18+ (September 2024). Zero JS framework required for cross-document; `document.startViewTransition()` for SPAs.
+
+### Cross-document transitions (MPA / Next.js App Router)
+
+Add one line to CSS — every navigation gets a cross-fade automatically:
+
+```css
+/* app/globals.css */
+@view-transition {
+  navigation: auto;   /* opt in to cross-document transitions for same-origin navigation */
+}
+```
+
+Customize the default cross-fade with `::view-transition-*` pseudos:
+
+```css
+/* Slide instead of cross-fade */
+@keyframes slide-in  { from { transform: translateX(100%) } }
+@keyframes slide-out { from { transform: translateX(0) } to { transform: translateX(-100%) } }
+
+::view-transition-new(root) {
+  animation: slide-in 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+::view-transition-old(root) {
+  animation: slide-out 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+```
+
+### Element morphs (`view-transition-name`)
+
+Assign a name to an element — the browser interpolates its position, size, and appearance between pages. This is the "shared element transition" pattern with zero JS:
+
+```css
+/* List page */
+.post-card[data-id="42"] {
+  view-transition-name: post-hero-42;  /* must be unique per page */
+}
+
+/* Detail page */
+.post-hero {
+  view-transition-name: post-hero-42;
+}
+```
+
+The browser matches by name and morphs between the two states. Works across full navigations.
+
+### SPA: `document.startViewTransition()`
+
+Wrap any state update that causes a visual change:
+
+```tsx
+import { useRouter } from 'next/navigation'
+
+function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
+  const router = useRouter()
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.preventDefault()
+
+    if (!document.startViewTransition) {
+      router.push(href)
+      return
+    }
+
+    document.startViewTransition(() => {
+      router.push(href)
+    })
+  }
+
+  return <a href={href} onClick={handleClick}>{children}</a>
+}
+```
+
+### React SPA: animated list item → detail morph
+
+```tsx
+// ListItem.tsx
+function ListItem({ id, title }: { id: string; title: string }) {
+  const router = useRouter()
+
+  const navigate = () => {
+    if (!document.startViewTransition) { router.push(`/item/${id}`); return }
+    document.startViewTransition(() => router.push(`/item/${id}`))
+  }
+
+  return (
+    <div
+      style={{ viewTransitionName: `item-${id}` }}
+      onClick={navigate}
+      className="cursor-pointer"
+    >
+      {title}
+    </div>
+  )
+}
+
+// DetailPage.tsx
+function DetailPage({ id, title }: { id: string; title: string }) {
+  return (
+    <div style={{ viewTransitionName: `item-${id}` }}>
+      <h1>{title}</h1>
+    </div>
+  )
+}
+```
+
+CSS to make the morph spring-quality:
+
+```css
+::view-transition-group(item-*) {
+  animation-duration: 0.4s;
+  animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);  /* spring-ish overshoot */
+}
+```
+
+### `@supports` fallback
+
+```css
+/* Only apply if the browser supports view transitions */
+@supports (view-transition-name: any) {
+  @view-transition { navigation: auto; }
+}
+```
+
+### Decision: View Transitions API vs Framer Motion
+
+| Scenario | Use |
+|---|---|
+| Cross-document (MPA, Next.js App Router) navigation | View Transitions API — CSS only |
+| SPA page change wrapping a router push | `startViewTransition()` + CSS |
+| Hero/shared element morph between two routes | `view-transition-name` on both sides |
+| Complex orchestration (stagger, timeline, spring) | Framer Motion |
+| Animated presence (unmount exit) | AnimatePresence — VT has no unmount phase |
+| Needs to work in React Native | Expo Router `sharedTransitionTag` (different API) |
+
+Rules:
+- `view-transition-name` values must be unique per page — two elements with the same name on one page break the transition.
+- Avoid `view-transition-name: none` on an element you don't want to morph — omitting the property is cleaner.
+- The `document.startViewTransition()` callback can be `async` — the browser pauses the old screenshot until the promise resolves.
+- For yan.so (Next.js App Router): `@view-transition { navigation: auto }` in globals.css is enough for polished page changes with zero extra code.
+- Do not name the `root` pseudo-element in both a cross-document and SPA transition on the same page — they conflict.
+
+---
+
+## Scroll-Driven Animations — `useScrollViewOffset` (Reanimated 3)
+
+Scroll position as a shared value, driving any animated style on the UI thread. Zero re-renders, no `onScroll` JS callbacks per frame.
+
+### `useScrollViewOffset` — the core hook
+
+```tsx
+import Animated, { useScrollViewOffset, useAnimatedStyle, interpolate, Extrapolation } from 'react-native-reanimated'
+import { useRef } from 'react'
+
+const scrollRef = useRef<Animated.ScrollView>(null)
+const scrollY = useScrollViewOffset(scrollRef)
+
+// scrollY.value tracks the scroll position in real time on the UI thread
+const animatedStyle = useAnimatedStyle(() => ({
+  opacity: interpolate(scrollY.value, [0, 100], [1, 0], Extrapolation.CLAMP),
+}))
+
+return (
+  <Animated.ScrollView ref={scrollRef}>
+    {/* content */}
+  </Animated.ScrollView>
+)
+```
+
+### Pattern 1: Parallax header
+
+```tsx
+const HEADER_HEIGHT = 300
+
+function ParallaxScreen() {
+  const scrollRef = useRef<Animated.ScrollView>(null)
+  const scrollY = useScrollViewOffset(scrollRef)
+
+  const headerStyle = useAnimatedStyle(() => ({
+    // Image scrolls at half speed — classic parallax
+    transform: [
+      { translateY: interpolate(scrollY.value, [-HEADER_HEIGHT, 0, HEADER_HEIGHT], [-HEADER_HEIGHT / 2, 0, HEADER_HEIGHT / 2], Extrapolation.CLAMP) },
+      // Slight scale on overscroll for a "rubber band" feel
+      { scale: interpolate(scrollY.value, [-HEADER_HEIGHT, 0], [1.5, 1], Extrapolation.CLAMP) },
+    ],
+  }))
+
+  return (
+    <View style={{ flex: 1 }}>
+      {/* Sticky header image */}
+      <Animated.Image
+        source={{ uri: imageUrl }}
+        style={[{ position: 'absolute', top: 0, left: 0, right: 0, height: HEADER_HEIGHT }, headerStyle]}
+        resizeMode="cover"
+      />
+
+      <Animated.ScrollView
+        ref={scrollRef}
+        scrollEventThrottle={1}
+        contentContainerStyle={{ paddingTop: HEADER_HEIGHT }}
+      >
+        {/* content */}
+      </Animated.ScrollView>
+    </View>
+  )
+}
+```
+
+### Pattern 2: Collapsing navigation bar
+
+The header fades out and shrinks as you scroll down; an opaque nav bar fades in:
+
+```tsx
+const NAV_SHOW_THRESHOLD = 80
+
+function CollapsingHeader({ title }: { title: string }) {
+  const scrollRef = useRef<Animated.ScrollView>(null)
+  const scrollY = useScrollViewOffset(scrollRef)
+
+  // Large hero title fades out
+  const heroTitleStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(scrollY.value, [0, NAV_SHOW_THRESHOLD], [1, 0], Extrapolation.CLAMP),
+    transform: [
+      { translateY: interpolate(scrollY.value, [0, NAV_SHOW_THRESHOLD], [0, -20], Extrapolation.CLAMP) },
+    ],
+  }))
+
+  // Compact sticky nav fades in
+  const navBarStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(scrollY.value, [NAV_SHOW_THRESHOLD * 0.6, NAV_SHOW_THRESHOLD], [0, 1], Extrapolation.CLAMP),
+  }))
+
+  return (
+    <View style={{ flex: 1 }}>
+      {/* Fixed nav bar */}
+      <Animated.View style={[styles.navBar, navBarStyle]} pointerEvents="none">
+        <Text style={styles.navTitle}>{title}</Text>
+      </Animated.View>
+
+      <Animated.ScrollView ref={scrollRef} scrollEventThrottle={1}>
+        {/* Hero section */}
+        <View style={styles.hero}>
+          <Animated.Text style={[styles.heroTitle, heroTitleStyle]}>{title}</Animated.Text>
+        </View>
+
+        {/* rest of content */}
+      </Animated.ScrollView>
+    </View>
+  )
+}
+```
+
+### Pattern 3: Scroll progress bar
+
+```tsx
+function ScrollProgressBar() {
+  const scrollRef = useRef<Animated.ScrollView>(null)
+  const scrollY = useScrollViewOffset(scrollRef)
+  const [contentHeight, setContentHeight] = useState(1)
+  const { height: windowHeight } = useWindowDimensions()
+
+  const barStyle = useAnimatedStyle(() => {
+    const maxScroll = contentHeight - windowHeight
+    const progress = maxScroll > 0 ? scrollY.value / maxScroll : 0
+    return {
+      width: `${interpolate(progress, [0, 1], [0, 100], Extrapolation.CLAMP)}%`,
+    }
+  })
+
+  return (
+    <View style={{ flex: 1 }}>
+      {/* Progress bar at the top */}
+      <View style={{ height: 3, backgroundColor: '#27272a' }}>
+        <Animated.View style={[{ height: 3, backgroundColor: '#fff' }, barStyle]} />
+      </View>
+
+      <Animated.ScrollView
+        ref={scrollRef}
+        scrollEventThrottle={1}
+        onContentSizeChange={(_, h) => setContentHeight(h)}
+      >
+        {/* content */}
+      </Animated.ScrollView>
+    </View>
+  )
+}
+```
+
+### FlatList (useAnimatedScrollHandler)
+
+`useScrollViewOffset` works only with `Animated.ScrollView`. For FlatList, use `useAnimatedScrollHandler`:
+
+```tsx
+import Animated, { useSharedValue, useAnimatedScrollHandler } from 'react-native-reanimated'
+
+const AnimatedFlatList = Animated.createAnimatedComponent(FlatList)
+
+function AnimatedList() {
+  const scrollY = useSharedValue(0)
+
+  const scrollHandler = useAnimatedScrollHandler((event) => {
+    scrollY.value = event.contentOffset.y
+  })
+
+  const headerStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(scrollY.value, [0, 80], [1, 0], Extrapolation.CLAMP),
+  }))
+
+  return (
+    <>
+      <Animated.View style={headerStyle}>{/* header */}</Animated.View>
+      <AnimatedFlatList
+        onScroll={scrollHandler}
+        scrollEventThrottle={1}
+        data={items}
+        renderItem={renderItem}
+      />
+    </>
+  )
+}
+```
+
+Rules:
+- `scrollEventThrottle={1}` is needed to receive every scroll event — without it, on iOS you get throttled events and the animation lags. Use `16` when you only need occasional updates and want to reduce overhead.
+- `useScrollViewOffset` requires an `Animated.ScrollView` ref — it won't work with a plain React Native `ScrollView`.
+- `Extrapolation.CLAMP` prevents values from running past the defined range; `Extrapolation.EXTEND` lets them continue linearly.
+- For parallax: the `translateY` input range should include negative values (overscroll) to handle rubber-band bounce gracefully.
+- Avoid driving layout-affecting styles (width, height, padding) from scroll on every frame — prefer opacity and transform.
+- FlatList + `useAnimatedScrollHandler`: pass `scrollEventThrottle={1}` and use `Animated.createAnimatedComponent(FlatList)`, not `Animated.FlatList` (which is deprecated).
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
