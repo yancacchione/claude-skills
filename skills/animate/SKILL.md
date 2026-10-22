@@ -617,6 +617,75 @@ When to use vs. `pretty`:
 
 **Next.js App Router** — wrap the snap container in a client component if you read `scrollY` from it; the container element itself can be server-rendered.
 
+**CSS `offset-path` — animate elements along a curved SVG path:**
+
+Use when an element should travel a non-linear path: particles following a data-viz line, a dot tracing a curve, objects moving along a track. Hardware-accelerated via the compositor; the path itself is static CSS.
+
+```css
+@keyframes travel {
+  to { offset-distance: 100%; }
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: currentColor;
+  position: absolute;
+
+  offset-path: path('M 0,100 C 50,0 150,200 200,100');
+  offset-distance: 0%;
+  offset-rotate: auto; /* rotates to follow path tangent */
+
+  animation: travel 1.2s ease-in-out forwards;
+}
+```
+
+`offset-rotate` options:
+
+| Value | Effect |
+|-------|--------|
+| `auto` | Element's forward face follows the path tangent |
+| `auto 90deg` | 90° offset — for a top-pointing arrow on a horizontal path |
+| `reverse` | Points backward along the path |
+| `0deg` | No rotation — element stays upright regardless of curve |
+
+In React / Framer Motion:
+```tsx
+import { motion } from 'framer-motion'
+
+<motion.div
+  initial={{ offsetDistance: '0%' }}
+  animate={{ offsetDistance: '100%' }}
+  transition={{ duration: 1.2, ease: 'easeInOut', repeat: Infinity }}
+  style={{
+    offsetPath: "path('M 0,100 C 50,0 150,200 200,100')",
+    offsetRotate: 'auto',
+    width: 10,
+    height: 10,
+    borderRadius: '50%',
+    background: 'currentColor',
+    position: 'absolute',
+  } as React.CSSProperties}
+/>
+```
+
+With the Web Animations API (imperative, no library):
+```ts
+const dot = document.querySelector('.dot') as HTMLElement
+dot.animate(
+  [{ offsetDistance: '0%' }, { offsetDistance: '100%' }],
+  { duration: 1200, easing: 'ease-in-out', iterations: Infinity }
+)
+```
+
+Support: Chrome 79+, Firefox 72+, Safari 15.4+.
+
+`offset-path` vs `@keyframes transform`:
+- **`offset-path`**: curved path that can't be described by simple transforms; correct tangent tracking (element "faces" direction of travel).
+- **`@keyframes transform`**: straight lines, diagonals, simple arcs; simpler to write; element doesn't rotate to follow the path.
+- Never use both on the same element — the results compose in non-obvious ways.
+
 **CSS sprite animation — frame-by-frame characters with `steps()`:**
 
 The right tool for Paper.design sprite sheets, game characters, and any multi-frame illusion without JS. Two approaches:
@@ -2432,6 +2501,85 @@ Rules:
 - **`interpolateColor` (not `interpolate`)** — colors need the dedicated function to blend correctly through RGB space.
 - If the module changes while the screen is open: animate from the current tint to the new one by also animating a `fromColor` shared value, or use `useDerivedValue` to compute the mid-point.
 - Pair with a `useFocusEffect` reset so the tint re-enters each time the screen gains focus (tab switch, back navigation).
+
+**Ambient floating blob drift — atmospheric background for immersive screens (React Native):**
+
+Two radial-gradient SVG circles drifting slowly at different periods and phase offsets give a lava-lamp, living background without any interaction. Use for journaling, reading, or any fullscreen screen that needs atmosphere, not UI. Uses Core `Animated` API — no Reanimated needed here since there's no gesture response or UI-thread deadline.
+
+```tsx
+import { Animated, Easing, View, StyleSheet, Dimensions } from 'react-native'
+import Svg, { Circle, Defs, RadialGradient, Stop } from 'react-native-svg'
+import { useRef, useEffect } from 'react'
+
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window')
+const BLOB_SIZE = Math.max(SCREEN_W, SCREEN_H) * 0.7
+
+function driftLoop(value: Animated.Value, duration: number, delay = 0) {
+  return Animated.loop(
+    Animated.sequence([
+      Animated.timing(value, { toValue: 1, duration, delay, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      Animated.timing(value, { toValue: 0, duration, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+    ])
+  )
+}
+
+function GlowBlob({ color, size, style, driftX, driftY, progress }: {
+  color: string; size: number; style: any; driftX: number; driftY: number; progress: Animated.Value
+}) {
+  const translateX = progress.interpolate({ inputRange: [0, 1], outputRange: [-driftX, driftX] })
+  const translateY = progress.interpolate({ inputRange: [0, 1], outputRange: [driftY, -driftY] })
+
+  return (
+    <Animated.View pointerEvents="none"
+      style={[{ position: 'absolute', width: size, height: size, transform: [{ translateX }, { translateY }] }, style]}>
+      <Svg width={size} height={size}>
+        <Defs>
+          <RadialGradient id="grad" cx="50%" cy="50%" r="50%">
+            <Stop offset="0%"   stopColor={color} stopOpacity={0.1} />
+            <Stop offset="55%"  stopColor={color} stopOpacity={0.04} />
+            <Stop offset="100%" stopColor={color} stopOpacity={0} />
+          </RadialGradient>
+        </Defs>
+        <Circle cx={size / 2} cy={size / 2} r={size / 2} fill="url(#grad)" />
+      </Svg>
+    </Animated.View>
+  )
+}
+
+export function AmbientBackground({ color = '#A9ABF9' }: { color?: string }) {
+  const progressA = useRef(new Animated.Value(0)).current
+  const progressB = useRef(new Animated.Value(0)).current
+
+  useEffect(() => {
+    const a = driftLoop(progressA, 13000)
+    const b = driftLoop(progressB, 17000, 1500)  // different period + 1.5s offset = never in sync
+    a.start()
+    b.start()
+    return () => { a.stop(); b.stop() }
+  }, [progressA, progressB])
+
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <GlowBlob color={color} size={BLOB_SIZE}
+        style={{ top: -BLOB_SIZE * 0.35, left: -BLOB_SIZE * 0.3 }}
+        driftX={30} driftY={22} progress={progressA} />
+      <GlowBlob color={color} size={BLOB_SIZE * 0.8}
+        style={{ bottom: -BLOB_SIZE * 0.35, right: -BLOB_SIZE * 0.25 }}
+        driftX={24} driftY={28} progress={progressB} />
+    </View>
+  )
+}
+```
+
+Rules:
+- **Two periods (13s / 17s) + 1.5s phase offset** — blobs are never in sync → lava-lamp drift rather than synchronized oscillation
+- **Core `Animated` over Reanimated** — background ambiance has no gesture response or UI-thread deadline; `Animated.loop` reads cleaner and is fine here
+- **`Easing.inOut(Easing.sin)`** — smooth entry and exit, sine shape = most biologically "alive" of the standard curves; never `spring` for autonomous ambient motion
+- **Blobs positioned partly off-screen** — edge softening is invisible; never clip at a hard edge (position with negative offsets so the `r=0` edge is outside the screen bounds)
+- **`pointerEvents="none"`** on both container and blob — ambient bg must never capture touches
+- **Blob opacity: 10% center → 4% mid → 0% edge** — any higher reads as a design accident on a light background
+- **Color**: pass a desaturated accent color; fully-saturated colors feel like a bug, not atmosphere
+- **Cleanup**: always `.stop()` both animations in `useEffect` return — loop animations leak without it
 
 **`Gesture.Tap` + `Gesture.LongPress` — interactive press and hold:**
 
