@@ -8156,6 +8156,240 @@ Rules:
 
 ---
 
+## `useFrameCallback` — Per-Frame Physics Loop (Reanimated 3)
+
+Reanimated's `useFrameCallback` runs a worklet on the UI thread before every frame — the equivalent of `requestAnimationFrame` but entirely on the UI thread with direct shared value access. No bridge, no `runOnJS` for reads/writes to shared values.
+
+Use when `withSpring`, `withDecay`, or `withTiming` aren't enough: custom integrators, particle systems, audio-reactive motion, or anything that needs frame-delta time.
+
+```tsx
+import Animated, {
+  useFrameCallback,
+  useSharedValue,
+  useAnimatedStyle,
+} from 'react-native-reanimated'
+
+// Simple oscillator — custom sine wave without withRepeat
+function OscillatingDot() {
+  const phase = useSharedValue(0)
+  const y = useSharedValue(0)
+
+  useFrameCallback((frameInfo) => {
+    const dt = frameInfo.timeSincePreviousFrame ?? 16 // ms; null on first frame
+    phase.value += dt * 0.003   // ~3 Hz
+    y.value = Math.sin(phase.value) * 40
+  })
+
+  const style = useAnimatedStyle(() => ({
+    transform: [{ translateY: y.value }],
+  }))
+
+  return <Animated.View style={[styles.dot, style]} />
+}
+```
+
+```tsx
+// Controllable: pause when active === false
+function PausableOscillator({ active }: { active: boolean }) {
+  const phase = useSharedValue(0)
+  const y = useSharedValue(0)
+
+  useFrameCallback((frameInfo) => {
+    const dt = frameInfo.timeSincePreviousFrame ?? 16
+    phase.value += dt * 0.002
+    y.value = Math.sin(phase.value) * 60
+  }, active) // second arg: isActive — SharedValue<boolean> or plain boolean
+
+  const style = useAnimatedStyle(() => ({
+    transform: [{ translateY: y.value }],
+  }))
+
+  return <Animated.View style={[styles.dot, style]} />
+}
+```
+
+```tsx
+// Custom gravity integrator — ball bounces on a floor
+function BouncingBall() {
+  const y    = useSharedValue(0)
+  const vy   = useSharedValue(0)          // velocity px/ms
+  const FLOOR       = 300
+  const GRAVITY     = 0.0004             // px/ms²
+  const RESTITUTION = 0.7                // energy kept on bounce
+
+  useFrameCallback((frameInfo) => {
+    const dt = frameInfo.timeSincePreviousFrame ?? 16
+    vy.value += GRAVITY * dt
+    y.value  += vy.value * dt
+
+    if (y.value >= FLOOR) {
+      y.value  = FLOOR
+      vy.value = -Math.abs(vy.value) * RESTITUTION
+    }
+  })
+
+  const style = useAnimatedStyle(() => ({
+    transform: [{ translateY: y.value }],
+  }))
+
+  return <Animated.View style={[styles.ball, style]} />
+}
+```
+
+Audio-reactive: combine `useFrameCallback` with `useAnimatedReaction` — the audio metering worklet writes into a shared value, `useFrameCallback` reads it each frame to drive particle scale/opacity without any JS re-renders.
+
+Rules:
+- `frameInfo.timeSincePreviousFrame` is `null` on the first frame — always default `?? 16`
+- All shared value reads/writes inside the callback run on the UI thread — no `runOnJS` needed for those
+- To push data to JS (e.g., `setState`, an array): `runOnJS(myFn)(value)`
+- Pass `isActive = false` to pause — Reanimated stops scheduling the callback entirely, no timer overhead
+- Don't let `phase` / angle values grow unboundedly — wrap with `% (Math.PI * 2)` to prevent float drift
+- `useFrameCallback` keeps running when the component is off-screen unless you gate `isActive` — always tie it to visibility
+- For simple repeating animations, prefer `withRepeat(withTiming(...))` — reach for `useFrameCallback` only when you need the time delta or cross-frame state
+
+---
+
+## CSS `animation-composition` — Stack Animations, Don't Replace
+
+`animation-composition` controls what happens when a CSS animation runs on a property that already has a value (from a CSS rule, inline style, or another animation). Default `replace` overwrites everything. `add` and `accumulate` let animations layer.
+
+Chrome 112+, Firefox 112+, Safari 16+.
+
+```css
+/* Problem: hover lift erases the JS-driven layout translateY,
+   snapping the card to translateY(-4px) from translateY(0) */
+.card {
+  transform: translateY(var(--offset-y));  /* set by JS for layout */
+}
+.card:hover {
+  animation: lift 200ms ease-out forwards;
+}
+@keyframes lift {
+  to { transform: translateY(-4px); }  /* replaces --offset-y */
+}
+
+/* Fix: add the lift on top of whatever the underlying transform is */
+.card:hover {
+  animation: lift 200ms ease-out forwards;
+  animation-composition: add;
+}
+@keyframes lift {
+  to { transform: translateY(-4px); }  /* now adds -4px to --offset-y */
+}
+```
+
+```css
+/* Stagger entrance + continuous pulse — two animations, one element */
+.badge {
+  animation:
+    enter 300ms ease-out both,
+    pulse  2s   ease-in-out 300ms infinite;
+  animation-composition: replace, add;  /* per-animation, comma-separated */
+}
+
+@keyframes enter {
+  from { opacity: 0; transform: scale(0.8); }
+  to   { opacity: 1; transform: scale(1);   }
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(0);    }
+  50%       { transform: scale(0.06); }
+}
+/* Result: badge enters at full scale, then breathes +0 to +6% on top */
+```
+
+| `animation-composition` | Effect |
+|-------------------------|--------|
+| `replace` | Default — animation value replaces the base value entirely |
+| `add` | Composes — for transforms, adds the matrices (translates stack, rotates sum) |
+| `accumulate` | Merges same-type values — `scale(0.5)` + `scale(0.5)` → `scale(1)` rather than `scale(0.5)` |
+
+When to use `add`:
+- Hover/active effects layered on top of JS-driven position (spotlight cards, drag-and-drop)
+- A continuous ambient animation that should stack on an entry animation
+- Two independently authored animation layers that should compose cleanly
+
+When to stay with `replace`: animations that target completely different properties, or when the base value is always `0` / identity. `replace` is simpler when composition doesn't matter.
+
+---
+
+## CSS `timeline-scope` — Cross-Element Scroll Timelines
+
+By default, CSS scroll-driven animations only fire when the scroll container is an *ancestor* of the animated element. `timeline-scope` lifts a named timeline to a common ancestor so siblings and distant relatives can reference it.
+
+Chrome 116+, Firefox 128+. No Safari support as of late 2026.
+
+**The problem:** a sticky header with a progress bar that should animate based on a sibling `<main>` scrolling.
+
+```css
+/* Step 1: name the timeline on the scroller */
+.content-area {
+  overflow-y: scroll;
+  scroll-timeline: --content-scroll block;
+}
+
+/* Step 2: lift the timeline to a common ancestor */
+.page {
+  timeline-scope: --content-scroll;
+}
+
+/* Step 3: any descendant of .page can now drive animations from --content-scroll */
+.sticky-header .progress-bar {
+  animation: grow-bar linear both;
+  animation-timeline: --content-scroll;
+  transform-origin: left center;
+}
+
+@keyframes grow-bar {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+```
+
+```html
+<div class="page">                        <!-- owns timeline-scope -->
+  <header class="sticky-header">
+    <div class="progress-bar"></div>      <!-- driven by sibling's scroll -->
+  </header>
+  <main class="content-area">            <!-- owns the scroll timeline -->
+    <!-- long content -->
+  </main>
+</div>
+```
+
+**Sticky section dots** — sidebar indicator activates as each section enters:
+
+```css
+.app-shell {
+  timeline-scope: --section-a, --section-b, --section-c;
+}
+
+.section-a { scroll-timeline: --section-a block; }
+.section-b { scroll-timeline: --section-b block; }
+.section-c { scroll-timeline: --section-c block; }
+
+/* Dot activates when section-a is entering the viewport */
+.nav-dot-a {
+  animation: activate linear both;
+  animation-timeline: --section-a;
+  animation-range: entry 0% entry 50%;
+}
+
+@keyframes activate {
+  to { background-color: var(--accent); scale: 1.2; }
+}
+```
+
+Rules:
+- `timeline-scope` must be on a *common ancestor* of both the scroller and the animated element — wrong ancestor = silent no-op
+- Multiple timelines: comma-separated — `timeline-scope: --t1, --t2, --t3`
+- Combine with `animation-range` to fire at specific scroll positions: `entry 0% cover 30%` means "from when the section starts entering to when it covers 30% of the viewport"
+- No Safari yet — include a no-animation fallback: `@supports (animation-timeline: scroll()) { ... }` guards all scroll-driven animation blocks so Safari gets the static fallback naturally
+- For Next.js App Router: put the `timeline-scope` and `scroll-timeline` rules in a CSS module or `globals.css`; no JS required
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
