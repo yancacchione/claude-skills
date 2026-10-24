@@ -2005,6 +2005,7 @@ Rules:
 - Returns `null` if the component hasn't rendered yet — always null-check
 - Use `pageX/pageY` for absolute screen positioning; `x/y` for parent-relative
 - Call `capture()` in response to a user interaction (press, gesture) — not on mount
+- If `measure()` returns `null`, add `collapsable={false}` to the `Animated.View` — React Native's view-flattening optimization can collapse the native node, severing ref-based measurement
 
 **Haptics coordination — pair physical feedback with spring animation completion:**
 
@@ -2212,6 +2213,15 @@ function TiltCard({ children }: { children: React.ReactNode }) {
 
 `interval`: `16` = every frame. Use `100+` for low-priority reads to save battery.
 `interval: 'auto'` lets Reanimated pick the fastest rate the device supports.
+
+`{ perspective }` **must be the first item** in the `transform` array when doing 3D rotations. Unlike CSS (where `perspective` is a separate property), React Native applies transforms left to right — placing `{ perspective }` after `{ rotateX }` produces a flat, broken 3D effect:
+```tsx
+// Wrong — perspective comes after rotateX, the 3D effect is lost
+transform: [{ rotateX: '20deg' }, { perspective: 800 }]
+
+// Correct — perspective always first
+transform: [{ perspective: 800 }, { rotateX: '20deg' }, { rotateY: '10deg' }]
+```
 
 Android requires `BODY_SENSORS` permission — add to `app.json` → `android.permissions`. iOS has no prompt requirement for motion data.
 
@@ -2635,6 +2645,7 @@ Lifecycle rules:
 - `onEnd` — gesture succeeded and finger lifted.
 - `onFinalize` — always fires (success or cancel). Use for press-up visual reset.
 - `Gesture.Exclusive(a, b)` — `a` tried first; if `a` fails, `b` fires. Put LongPress first to give it priority over Tap.
+- `Gesture.Race(a, b)` — the FIRST recognizer to activate wins; all others are immediately cancelled. Use when a pan gesture competes with a native scrollable — `Gesture.Race(panDismiss, nativeScroll)` ensures whichever fires first claims the touch, preventing ghost scrolls during a swipe-to-dismiss.
 - Never call `runOnJS` in `onBegin` or `onFinalize` for navigation or state changes — only in `onEnd` / `onStart` where success is confirmed.
 
 **`Pressable` — lightweight alternative when no complex gesture is needed:**
