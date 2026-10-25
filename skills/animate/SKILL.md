@@ -8401,6 +8401,469 @@ Rules:
 
 ---
 
+## Swipe-to-Reveal Row Action (React Native)
+
+The iOS mail pattern — pan a list row left to reveal action buttons (Archive, Delete, etc.) underneath. Different from the card-swipe stack: the row does not leave the list; it snaps to a "revealed" position where buttons are tappable, then snaps back on dismiss.
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring,
+  runOnJS, interpolate, Extrapolation,
+} from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import { View, Text, Pressable, StyleSheet } from 'react-native'
+
+const ACTION_WIDTH = 80   // px width of each action button
+const SNAP_THRESHOLD = ACTION_WIDTH * 0.4  // how far to drag before snapping open
+
+interface SwipeRowProps {
+  children: React.ReactNode
+  onArchive: () => void
+  onDelete: () => void
+}
+
+function SwipeRow({ children, onArchive, onDelete }: SwipeRowProps) {
+  const translateX  = useSharedValue(0)
+  const startX      = useSharedValue(0)
+  const isOpen      = useSharedValue(false)
+  const REVEALED_X  = -(ACTION_WIDTH * 2)  // fully revealed = both buttons visible
+
+  const pan = Gesture.Pan()
+    .activeOffsetX([-8, 8])               // activate after 8px horizontal movement
+    .failOffsetY([-10, 10])               // fail if clearly a vertical scroll
+    .onStart(() => {
+      startX.value = translateX.value
+    })
+    .onUpdate((e) => {
+      // Clamp: can't drag right past 0, can't drag left past REVEALED_X
+      const next = startX.value + e.translationX
+      translateX.value = Math.max(REVEALED_X, Math.min(0, next))
+    })
+    .onEnd((e) => {
+      'worklet'
+      const pastThreshold = translateX.value < -SNAP_THRESHOLD
+      const fastLeftSwipe = e.velocityX < -500
+
+      if (pastThreshold || fastLeftSwipe) {
+        // Snap open
+        translateX.value = withSpring(REVEALED_X, { damping: 22, stiffness: 280 })
+        isOpen.value = true
+      } else {
+        // Snap back closed
+        translateX.value = withSpring(0, { damping: 22, stiffness: 280 })
+        isOpen.value = false
+      }
+    })
+
+  const rowStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: translateX.value }],
+  }))
+
+  // Action container opacity fades in as row slides left
+  const actionsStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(translateX.value, [0, REVEALED_X / 2], [0, 1], Extrapolation.CLAMP),
+  }))
+
+  const close = () => {
+    translateX.value = withSpring(0, { damping: 22, stiffness: 280 })
+    isOpen.value = false
+  }
+
+  return (
+    <View style={styles.container}>
+      {/* Actions rendered behind the row */}
+      <Animated.View style={[styles.actions, actionsStyle]}>
+        <Pressable
+          style={[styles.action, styles.archiveAction]}
+          onPress={() => { close(); onArchive() }}
+        >
+          <Text style={styles.actionLabel}>Archive</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.action, styles.deleteAction]}
+          onPress={() => { close(); onDelete() }}
+        >
+          <Text style={styles.actionLabel}>Delete</Text>
+        </Pressable>
+      </Animated.View>
+
+      {/* Row content slides left */}
+      <GestureDetector gesture={pan}>
+        <Animated.View style={[styles.row, rowStyle]}>
+          {children}
+        </Animated.View>
+      </GestureDetector>
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  container: { overflow: 'hidden' },
+  row: { backgroundColor: '#111' },
+  actions: {
+    position: 'absolute', top: 0, right: 0, bottom: 0,
+    flexDirection: 'row',
+  },
+  action: {
+    width: ACTION_WIDTH,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  archiveAction: { backgroundColor: '#3f3f46' },
+  deleteAction:  { backgroundColor: '#7f1d1d' },
+  actionLabel: { color: '#fff', fontSize: 12, fontFamily: 'JetBrainsMono' },
+})
+```
+
+**Competing with native scroll — use `Gesture.Race`:**
+
+When the row is inside a `FlatList` or `ScrollView`, the horizontal pan competes with vertical scroll. Wrap `Gesture.Race(pan, Gesture.Native())` to let whichever fires first claim the touch:
+
+```tsx
+const scrollSafe = Gesture.Race(pan, Gesture.Native())
+
+<GestureDetector gesture={scrollSafe}>
+  <Animated.View style={rowStyle}>{children}</Animated.View>
+</GestureDetector>
+```
+
+`Gesture.Native()` represents the containing scrollable's native gesture. If the user's first 8px of movement is more vertical than horizontal, `Gesture.Native()` wins and the `pan` is cancelled — no jank.
+
+**Auto-close open row when another row is opened:**
+
+Track the open row via a shared `Ref` in the parent list and call `close()` on the previous row:
+
+```tsx
+function SwipeList({ items }: { items: Item[] }) {
+  const openRowRef = useRef<{ close: () => void } | null>(null)
+
+  return (
+    <FlatList
+      data={items}
+      renderItem={({ item }) => (
+        <SwipeRow
+          onOpen={(controls) => {
+            openRowRef.current?.close()
+            openRowRef.current = controls
+          }}
+          onArchive={() => archive(item.id)}
+          onDelete={() => remove(item.id)}
+        >
+          <RowContent item={item} />
+        </SwipeRow>
+      )}
+    />
+  )
+}
+// In SwipeRow: expose close() via useImperativeHandle or pass it up in onOpen()
+```
+
+Rules:
+- `activeOffsetX: [-8, 8]` prevents the gesture from activating on tiny accidental horizontal nudges
+- `failOffsetY: [-10, 10]` yields to vertical scroll when the initial intent is clearly vertical
+- Never render actions outside the row's `overflow: 'hidden'` container — they'll bleed into adjacent rows
+- For a single action (delete only): set `REVEALED_X = -ACTION_WIDTH` and use full-width for the button
+- **Full-drag-to-action** (drag all the way = confirms action immediately): compare `translateX.value < REVEALED_X * 0.9` in `onEnd` and call `runOnJS(onDelete)()` before snapping back
+
+---
+
+## `Gesture.Hover` — iPad Pointer & Cursor Interactions (React Native)
+
+On iPad with a pointer (Magic Keyboard, mouse, Apple Pencil), `Gesture.Hover` fires `onHoverIn` / `onHoverOut` / `onChange` events. Zero on touch — safe to add alongside tap/pan gestures.
+
+Use for hover states, cursor-aware lighting effects, tooltip triggers, and focus rings on interactive elements.
+
+```tsx
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring,
+} from 'react-native-reanimated'
+
+// Hover lift + scale — card rises toward the cursor on iPad
+function HoverCard({ children }: { children: React.ReactNode }) {
+  const scale     = useSharedValue(1)
+  const shadowY   = useSharedValue(2)
+
+  const hover = Gesture.Hover()
+    .onBegin(() => {
+      scale.value   = withSpring(1.02, { damping: 18, stiffness: 300 })
+      shadowY.value = withSpring(8,    { damping: 18, stiffness: 300 })
+    })
+    .onEnd(() => {
+      scale.value   = withSpring(1,  { damping: 18, stiffness: 300 })
+      shadowY.value = withSpring(2,  { damping: 18, stiffness: 300 })
+    })
+
+  const style = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+    shadowOffset: { width: 0, height: shadowY.value },
+    shadowOpacity: 0.25,
+    shadowRadius: shadowY.value * 1.5,
+  }))
+
+  return (
+    <GestureDetector gesture={hover}>
+      <Animated.View style={style}>{children}</Animated.View>
+    </GestureDetector>
+  )
+}
+```
+
+**Cursor position tracking — spotlight/glow follows cursor inside a card:**
+
+```tsx
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring, interpolate, Extrapolation,
+} from 'react-native-reanimated'
+import Svg, { RadialGradient, Stop, Rect, Defs } from 'react-native-svg'
+
+function SpotlightCard({ width = 300, height = 180, children }) {
+  const cursorX = useSharedValue(width / 2)
+  const cursorY = useSharedValue(height / 2)
+  const glowOpacity = useSharedValue(0)
+
+  const hover = Gesture.Hover()
+    .onBegin((e) => {
+      glowOpacity.value = withSpring(1, { damping: 15 })
+    })
+    .onChange((e) => {
+      // e.x, e.y: cursor position relative to the element
+      cursorX.value = e.x
+      cursorY.value = e.y
+    })
+    .onEnd(() => {
+      glowOpacity.value = withSpring(0, { damping: 15 })
+    })
+
+  const glowStyle = useAnimatedStyle(() => ({
+    opacity: glowOpacity.value,
+    left: cursorX.value - 80,
+    top:  cursorY.value - 80,
+  }))
+
+  return (
+    <GestureDetector gesture={hover}>
+      <Animated.View style={{ width, height, overflow: 'hidden' }}>
+        {/* Glow follows cursor */}
+        <Animated.View
+          pointerEvents="none"
+          style={[{
+            position: 'absolute', width: 160, height: 160,
+            borderRadius: 80, backgroundColor: 'rgba(255,255,255,0.06)',
+          }, glowStyle]}
+        />
+        {children}
+      </Animated.View>
+    </GestureDetector>
+  )
+}
+```
+
+**Compose hover + tap — hover highlights, tap confirms:**
+
+```tsx
+const hover = Gesture.Hover()
+  .onBegin(() => { bg.value = withSpring(1) })
+  .onEnd(()   => { bg.value = withSpring(0) })
+
+const tap = Gesture.Tap()
+  .onEnd(() => { runOnJS(onPress)() })
+
+// Simultaneous: both run independently, hover doesn't block tap
+const composed = Gesture.Simultaneous(hover, tap)
+```
+
+Rules:
+- `Gesture.Hover` only fires with a pointer; touch events are not hover events — safe to add on any element without affecting phone behavior
+- `e.x` / `e.y` in `onChange` are relative to the gesture handler's view — no need to convert from screen coordinates
+- Use `Gesture.Simultaneous` to run hover + tap together; `Gesture.Exclusive` would let only one fire
+- On phone (no pointer): hover events never fire; animate the resting state statically
+- `glowOpacity = withSpring(0)` in `onEnd` fades the spotlight out when the cursor leaves — always clean up on `onEnd`
+
+---
+
+## CSS Anchor Positioning — Zero-JS Positioned Overlays
+
+The CSS Anchor Positioning API (Chrome 125+, Safari 18.1+) lets any element `position` itself relative to a named "anchor" element — no JS `getBoundingClientRect`, no Popper.js. Tooltips, dropdowns, and context menus that stay anchored to their trigger, with CSS-only repositioning when near viewport edges.
+
+Pair with `@starting-style` for enter animations; the overlay enters only when it opens, with zero JS.
+
+```css
+/* 1. Name the trigger element as an anchor */
+.trigger-btn {
+  anchor-name: --my-anchor;
+}
+
+/* 2. Positioned overlay references the anchor */
+.tooltip {
+  position: absolute;
+  position-anchor: --my-anchor;
+
+  /* Align tooltip above the anchor, centered horizontally */
+  top: anchor(top);
+  bottom: calc(anchor(bottom) + 8px);
+  left: anchor(center);
+  translate: -50% -100%;
+
+  /* Flip to below if not enough space above */
+  position-try-fallbacks: flip-block;
+}
+```
+
+**Dropdown menu — opens below the button, flips above when near bottom edge:**
+
+```css
+/* Trigger button */
+.menu-btn {
+  anchor-name: --menu-anchor;
+}
+
+/* Dropdown panel */
+[popover].menu-panel {
+  position: absolute;
+  position-anchor: --menu-anchor;
+
+  /* Default: below the button, left-aligned */
+  top: calc(anchor(bottom) + 4px);
+  left: anchor(left);
+  min-width: anchor-size(width);  /* at least as wide as the button */
+
+  /* If not enough space below, try above */
+  position-try-fallbacks: flip-block;
+
+  /* Enter/exit with @starting-style */
+  opacity: 1;
+  translate: 0 0;
+  scale: 1;
+  transition:
+    opacity 0.15s ease-out,
+    translate 0.15s ease-out,
+    scale 0.15s ease-out,
+    display 0.15s allow-discrete,
+    overlay 0.15s allow-discrete;
+}
+
+[popover].menu-panel:not(:popover-open) {
+  opacity: 0;
+  translate: 0 -4px;
+  scale: 0.97;
+}
+
+@starting-style {
+  [popover].menu-panel:popover-open {
+    opacity: 0;
+    translate: 0 -4px;
+    scale: 0.97;
+  }
+}
+```
+
+```html
+<button class="menu-btn" popovertarget="my-menu">Options</button>
+<div id="my-menu" class="menu-panel" popover>
+  <button>Edit</button>
+  <button>Delete</button>
+</div>
+<!-- No JavaScript needed — Popover API handles open/close, anchor positions it -->
+```
+
+**Tooltip on hover — CSS-only:**
+
+```css
+.has-tooltip { anchor-name: --tooltip-anchor; }
+
+.tooltip-bubble {
+  position: absolute;
+  position-anchor: --tooltip-anchor;
+  top: anchor(top);
+  left: anchor(center);
+  translate: -50% calc(-100% - 6px);
+
+  position-try-fallbacks: flip-block, flip-inline;
+
+  /* Visibility tied to :hover on the anchor — no JS */
+  opacity: 0;
+  scale: 0.95;
+  transition: opacity 0.12s ease-out, scale 0.12s ease-out;
+  pointer-events: none;
+}
+
+.has-tooltip:hover + .tooltip-bubble,
+.has-tooltip:focus-visible + .tooltip-bubble {
+  opacity: 1;
+  scale: 1;
+}
+```
+
+**`inset-area` shorthand** — instead of specifying all four positions:
+
+```css
+/* Alternative: use inset-area for common positions */
+.tooltip {
+  position: absolute;
+  position-anchor: --my-anchor;
+  inset-area: top center;        /* center-align above the anchor */
+  margin-bottom: 6px;
+}
+
+/* inset-area values: top | bottom | left | right | center */
+/* Two-word: "top center" = above, horizontally centered */
+/* "bottom span-all" = below, full width of the containing block */
+```
+
+`position-try-fallbacks` — fallback positions when the element would overflow the viewport:
+| Value | Behavior |
+|-------|---------|
+| `flip-block` | Try flipping from top to bottom (or bottom to top) |
+| `flip-inline` | Try flipping from left to right |
+| `flip-start` | Flip the logical start/end |
+| `--custom-try` | Use a named `@position-try` rule for complex fallbacks |
+
+**`@position-try` — custom fallback positions:**
+
+```css
+@position-try --menu-above {
+  top: auto;
+  bottom: calc(anchor(top) + 4px);
+  left: anchor(left);
+}
+
+.menu-panel {
+  position-try-fallbacks: --menu-above, flip-inline;
+}
+```
+
+`@supports` guard — anchor positioning is new; fall back to fixed/absolute positioning for Firefox:
+
+```css
+/* Firefox fallback: fixed position near the trigger */
+.tooltip-bubble {
+  position: fixed;
+  top: 4rem;        /* rough fallback */
+  left: 50%;
+  translate: -50% 0;
+}
+
+@supports (anchor-name: --a) {
+  .tooltip-bubble {
+    position: absolute;
+    position-anchor: --tooltip-anchor;
+    inset-area: top center;
+    translate: 0 -6px;
+  }
+}
+```
+
+When to use anchor positioning vs JS:
+| Use CSS anchor positioning | Use JS (Floating UI / Popper) |
+|---------------------------|-------------------------------|
+| Simple tooltip / dropdown | Complex measurement-dependent positioning |
+| Native `<button>` + `popover` | React portals with dynamic anchor elements |
+| CSS-only open/close (`popover` API) | JS-controlled visibility (useState) |
+| Static anchor position | Anchor that moves on resize/scroll |
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
