@@ -8864,6 +8864,216 @@ When to use anchor positioning vs JS:
 
 ---
 
+## Reanimated Layout Animations — Preset Table & Modifier Chain
+
+`entering`/`exiting` on `Animated.View` accept built-in presets. The naming convention is `Action + Direction?` (e.g. `FadeIn`, `FadeInDown`, `SlideInLeft`, `BounceOutRight`). Direction = where the element comes FROM on enter.
+
+### Built-in preset families
+
+| Family | Entering examples | Feel |
+|--------|------------------|------|
+| `Fade` | `FadeIn` `FadeInDown` `FadeInUp` `FadeInLeft` `FadeInRight` | Subtle, versatile — default choice |
+| `Slide` | `SlideInLeft` `SlideInRight` `SlideInUp` `SlideInDown` | Directional, strong — drawers, sheets |
+| `Zoom` | `ZoomIn` `ZoomInDown` `ZoomInUp` `ZoomInRotate` | Expanding content, modals |
+| `Bounce` | `BounceIn` `BounceInDown` `BounceInUp` `BounceInLeft` `BounceInRight` | Playful, delight moments |
+| `Flip` | `FlipInXDown` `FlipInXUp` `FlipInYLeft` `FlipInYRight` | Card reveals, 3D feel |
+| `Rotate` | `RotateInDownLeft` `RotateInDownRight` `RotateInUpLeft` `RotateInUpRight` | Whimsical, rotating icon entrance |
+| `Roll` | `RollInLeft` `RollInRight` | Horizontal rolling |
+| `LightSpeed` | `LightSpeedInRight` `LightSpeedInLeft` | Fast, swooping — notifications |
+| `Pinwheel` | `PinwheelIn` | Particle-like, use sparingly |
+
+All families have mirrored exiting variants (`FadeOut`, `FadeOutDown`, `BounceOutRight`, etc.).
+
+**Direction rule:** `FadeInDown` = element starts above and moves down into position (it enters from above). Applies across all families.
+
+### Modifier chain
+
+Every preset is a class — chain modifiers before passing as a prop:
+
+```tsx
+import { FadeInDown, ZoomIn } from 'react-native-reanimated'
+import { Easing, runOnJS } from 'react-native-reanimated'
+
+// Duration
+entering={FadeInDown.duration(400)}
+
+// Delay — stagger with index
+entering={FadeInDown.delay(index * 50).duration(300)}
+
+// Springify — replace timing curve with spring physics
+entering={FadeInDown.springify()}
+entering={FadeInDown.springify().mass(0.8).stiffness(220).damping(18)}
+
+// Easing — custom curve (non-spring only)
+entering={FadeInDown.easing(Easing.out(Easing.back(1.5)))}
+
+// withInitialValues — override the starting property values
+entering={FadeInDown.withInitialValues({ transform: [{ translateY: -40 }], opacity: 0 })}
+
+// withCallback — JS callback on completion (worklet required)
+entering={FadeInDown.duration(300).withCallback((finished) => {
+  'worklet'
+  if (finished) runOnJS(onEnterComplete)()
+})}
+```
+
+Chain `.springify()` before `.mass()` / `.stiffness()` / `.damping()`.
+
+### Layout transition types
+
+The `layout` prop animates position/size changes when the view reflows (items reorder, sizes change):
+
+```tsx
+import {
+  LinearTransition,    // straight tween — reliable, use as default
+  CurvedTransition,    // arcs through space — smooth but can feel odd in tight lists
+  JumpingTransition,   // parabolic arc to new position — playful
+  SequencedTransition, // first moves X then Y — stepped, structured
+} from 'react-native-reanimated'
+
+// Default: springify LinearTransition for natural physics
+<Animated.View layout={LinearTransition.springify().damping(18)} />
+
+// Slower, with delay
+<Animated.View layout={LinearTransition.duration(300).delay(50)} />
+
+// Playful reorder (Motamo collection editor)
+<Animated.View layout={JumpingTransition.duration(400)} />
+```
+
+### Complete filtered-list example
+
+```tsx
+import Animated, {
+  FadeInDown, FadeOut, LinearTransition, LayoutAnimationConfig
+} from 'react-native-reanimated'
+
+function FilteredList({ items, activeFilter }: { items: Item[]; activeFilter: string }) {
+  const filtered = items.filter(item => activeFilter === 'all' || item.tag === activeFilter)
+
+  return (
+    // skipEntering: suppress enter animations on initial render;
+    // new items that appear after filter change still animate in
+    <LayoutAnimationConfig skipEntering>
+      {filtered.map((item, index) => (
+        <Animated.View
+          key={item.id}
+          entering={FadeInDown.delay(index * 40).duration(280).springify()}
+          exiting={FadeOut.duration(180)}
+          layout={LinearTransition.springify().damping(20)}
+        >
+          {/* item content */}
+        </Animated.View>
+      ))}
+    </LayoutAnimationConfig>
+  )
+}
+```
+
+Rules:
+- Put `entering`/`exiting`/`layout` on the `Animated.View` inside `renderItem`, never on the `FlatList` itself
+- `LayoutAnimationConfig skipEntering` wraps the list — not each item
+- For exit animations to work, items must have a stable `key` that disappears when removed
+- `springify()` on `layout` makes reordering feel physical; `.damping(18)` is a good starting value
+- For 100+ items use `@shopify/flash-list` wrapped with `Animated.createAnimatedComponent(FlashList)`
+
+---
+
+## CSS `interpolate-size` — Animate to `height: auto` Without JavaScript
+
+Before this property, animating a container from `height: 0` to its natural height required JS to measure and set a pixel value. `interpolate-size: allow-keywords` tells the browser to interpolate to/from intrinsic size keywords (`auto`, `min-content`, `max-content`, `fit-content`). Chrome 129+, Safari 18.2+, Firefox 133+.
+
+**CSS-only accordion with `<details>` — zero JS:**
+
+```css
+.accordion-item {
+  interpolate-size: allow-keywords;
+}
+
+.accordion-content {
+  height: 0;
+  overflow: hidden;
+  transition: height 300ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* <details> uses the [open] attribute natively */
+.accordion-item[open] .accordion-content {
+  height: auto;  /* now transitions! */
+}
+
+/* Animate the disclosure arrow */
+.accordion-item summary { list-style: none; cursor: pointer; }
+.accordion-item summary::after {
+  content: '›';
+  display: inline-block;
+  transition: rotate 200ms ease-out;
+}
+.accordion-item[open] summary::after { rotate: 90deg; }
+```
+
+```html
+<details class="accordion-item">
+  <summary>Question title</summary>
+  <div class="accordion-content">
+    <p>Answer content — expands to natural height, animated.</p>
+  </div>
+</details>
+```
+
+**JS-toggle version (for React state):**
+
+```css
+.panel {
+  interpolate-size: allow-keywords;
+  height: 0;
+  overflow: hidden;
+  transition: height 300ms ease-out;
+}
+.panel.is-open { height: auto; }
+```
+
+```tsx
+<div className={`panel ${isOpen ? 'is-open' : ''}`}>
+  {/* content */}
+</div>
+```
+
+**Global enable on `:root`:**
+
+```css
+:root { interpolate-size: allow-keywords; }
+```
+
+Convenient but wide — every element on the page can now transition to `auto`. Scope to a container when possible.
+
+**`@supports` fallback:**
+
+```css
+.accordion-content {
+  /* Fallback: JS sets explicit pixel height */
+  overflow: hidden;
+  transition: height 300ms ease-out;
+}
+
+@supports (interpolate-size: allow-keywords) {
+  .accordion-item { interpolate-size: allow-keywords; }
+  /* height: auto is now animatable — no JS measuring needed */
+}
+```
+
+**Known limitation — exit animation gap:**
+
+`interpolate-size` makes `0 → auto` work, but `auto → 0` on *collapse* requires JS or a workaround. On close, the browser would need to interpolate FROM `auto` back to `0` — that direction works too, but only if the element's `height` property is animated, not just toggled. In practice: toggling a class on/off works for both expand and collapse in Chrome/Firefox 133+, but test in Safari.
+
+| Use `interpolate-size` | Use JS `getBoundingClientRect` measurement |
+|------------------------|------------------------------------------|
+| Static content inside the expanding element | Content changes height after mount (async data) |
+| `<details>` / `<summary>` native accordion | Needs `ResizeObserver` to track size changes |
+| Simple show/hide with natural height | Need precise control over intermediate heights |
+| No IE11/old Safari requirement | Must support older browsers reliably |
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
