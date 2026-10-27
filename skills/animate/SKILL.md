@@ -1363,6 +1363,80 @@ import { AnimatePresence } from 'framer-motion'  // AnimatePresence stays a norm
 
 Key rule: **`layoutId` requires `domMax`** — it's excluded from `domAnimation`. If you use shared-element morphs, use `domMax` instead.
 
+**`MotionConfig` — set default transitions for an entire subtree:**
+
+`MotionConfig` injects a default `transition` into every `motion.*` or `m.*` element below it in the tree. Use it to avoid repeating the same spring config on every component, making the whole app feel consistent without prop-drilling.
+
+```tsx
+import { MotionConfig } from 'framer-motion'
+
+// Set once at layout level — every motion.div below inherits this spring
+function AppLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <MotionConfig transition={{ type: 'spring', stiffness: 300, damping: 25 }}>
+      {children}
+    </MotionConfig>
+  )
+}
+
+// A component can still override per-element:
+<motion.div
+  animate={{ scale: 1.05 }}
+  transition={{ duration: 0.15 }}  // overrides MotionConfig for this one element
+/>
+
+// Global reduced-motion — swap to instant for the whole app:
+const isReduced = useReducedMotion()
+<MotionConfig
+  transition={isReduced ? { duration: 0 } : { type: 'spring', stiffness: 300, damping: 25 }}
+>
+  {children}
+</MotionConfig>
+
+// Or use the built-in reducedMotion prop — no hook needed:
+<MotionConfig reducedMotion="user">  {/* respects OS preference across the entire tree */}
+  {children}
+</MotionConfig>
+```
+
+Rules:
+- `MotionConfig` is the right way to encode a brand's spring "feel" — don't repeat `transition={{ type: 'spring', ... }}` on every component.
+- A `transition` prop on a `motion.div` overrides the `MotionConfig` for that element only.
+- Nesting `MotionConfig` is supported — the nearest ancestor wins.
+- `reducedMotion="user"` is the simplest whole-app reduced motion gate. Replaces per-component `useReducedMotion()` checks for simple cases. Use `"always"` for screenshot/testing contexts.
+- For `LazyMotion` users: `MotionConfig` imports from `framer-motion` (not `m.*`) — unchanged.
+
+**`AnimatePresence initial={false}` — skip mount animations on the first render:**
+
+Without `initial={false}`, every child visible when `AnimatePresence` first mounts plays its `initial → animate` transition on page load. A list of 20 items all flies in simultaneously — usually not the intent. `initial={false}` treats already-mounted children as already-animated; only items added *after* the initial render animate in.
+
+```tsx
+// Without initial={false}: ALL items animate in on page load (usually wrong for lists)
+<AnimatePresence>
+  {items.map(item => (
+    <motion.li key={item.id} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} />
+  ))}
+</AnimatePresence>
+
+// With initial={false}: items on first render appear instantly;
+// only items added later animate in — correct for toasts, live lists, notification feeds
+<AnimatePresence initial={false}>
+  {items.map(item => (
+    <motion.li key={item.id} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} />
+  ))}
+</AnimatePresence>
+```
+
+When to use `initial={false}`:
+- Server-rendered or pre-populated lists where the items exist on load
+- Toast / notification lists — existing toasts should not re-animate when the component mounts
+- Tab content already populated before `AnimatePresence` mounts
+- Any case where "animate in" should mean "appeared *after* I started watching"
+
+When to leave `initial` at default:
+- A dialog that conditionally renders: its first appearance IS the mount event you want to animate
+- Onboarding / splash flows where the first-render animation is intentional
+
 ---
 
 ### GSAP (complex web timelines)
