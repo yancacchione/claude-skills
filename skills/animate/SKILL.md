@@ -9148,6 +9148,293 @@ Convenient but wide — every element on the page can now transition to `auto`. 
 
 ---
 
+## Lottie + Rive — Designer-Authored Animations
+
+Use these when a designer or motion tool (After Effects, Rive editor) owns the animation — not coded by hand. Pick the right one:
+
+| | Lottie | Rive |
+|---|---|---|
+| Source | After Effects via Bodymovin plugin, or [lottiefiles.com](https://lottiefiles.com) | Rive editor ([rive.app](https://rive.app)) |
+| Format | `.json` or `.lottie` (compressed) | `.riv` binary |
+| Interactivity | Playback control only (play/pause/scrub/speed) | Full state machine: enter/exit states, inputs, blend |
+| File size | Medium–large (JSON is verbose; `.lottie` is ~10× smaller) | Compact binary |
+| When to use | Illustration loops, loading spinners, one-shot reveals | Buttons, toggles, avatars, game UIs with reactive states |
+
+### Lottie — React Native (`lottie-react-native`)
+
+```bash
+npx expo install lottie-react-native
+```
+
+```tsx
+import LottieView from 'lottie-react-native'
+import { useRef } from 'react'
+
+export function SuccessAnimation({ onComplete }: { onComplete?: () => void }) {
+  const ref = useRef<LottieView>(null)
+
+  return (
+    <LottieView
+      ref={ref}
+      source={require('@/assets/animations/success.json')}
+      autoPlay
+      loop={false}
+      speed={1.2}
+      style={{ width: 120, height: 120 }}
+      onAnimationFinish={onComplete}
+      // resizeMode: 'contain' (default) | 'cover' | 'center'
+    />
+  )
+}
+```
+
+**Scrub Lottie progress with a gesture (Reanimated 3):**
+
+`LottieView` exposes a `progress` prop that accepts an `Animated.Value` or `useSharedValue`. Drive it from a pan gesture or scroll position to create interactive Lottie animations.
+
+```tsx
+import LottieView from 'lottie-react-native'
+import Animated, {
+  useSharedValue, useAnimatedProps, useAnimatedStyle,
+  withSpring, interpolate, Extrapolation,
+} from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+
+const AnimatedLottie = Animated.createAnimatedComponent(LottieView)
+
+export function ScrubLottie() {
+  const progress = useSharedValue(0)
+
+  const pan = Gesture.Pan()
+    .onUpdate((e) => {
+      // Map horizontal drag 0–300px → 0–1 progress
+      progress.value = interpolate(e.translationX, [0, 300], [0, 1], Extrapolation.CLAMP)
+    })
+    .onEnd(() => {
+      // Snap to nearest end: 0 or 1
+      progress.value = withSpring(progress.value > 0.5 ? 1 : 0)
+    })
+
+  const animatedProps = useAnimatedProps(() => ({
+    progress: progress.value,
+  }))
+
+  return (
+    <GestureDetector gesture={pan}>
+      <AnimatedLottie
+        source={require('@/assets/animations/loader.json')}
+        animatedProps={animatedProps}
+        loop={false}
+        style={{ width: 200, height: 200 }}
+      />
+    </GestureDetector>
+  )
+}
+```
+
+**Scroll-driven Lottie (scroll reveals a once-per-session animation):**
+
+```tsx
+import { useScrollViewOffset } from 'react-native-reanimated'
+import { useAnimatedProps } from 'react-native-reanimated'
+import { interpolate, Extrapolation } from 'react-native-reanimated'
+import Animated from 'react-native-reanimated'
+import LottieView from 'lottie-react-native'
+import { useRef } from 'react'
+
+const AnimatedLottie = Animated.createAnimatedComponent(LottieView)
+
+export function ScrollRevealLottie({ scrollRef }: { scrollRef: React.RefObject<Animated.ScrollView> }) {
+  const scrollOffset = useScrollViewOffset(scrollRef)
+
+  const animatedProps = useAnimatedProps(() => ({
+    // Progress 0→1 as user scrolls from 200px to 600px
+    progress: interpolate(scrollOffset.value, [200, 600], [0, 1], Extrapolation.CLAMP),
+  }))
+
+  return (
+    <AnimatedLottie
+      source={require('@/assets/animations/hero.json')}
+      animatedProps={animatedProps}
+      loop={false}
+      style={{ width: 300, height: 300 }}
+    />
+  )
+}
+```
+
+**Rules for Lottie in React Native:**
+- Use `.lottie` (compressed dotLottie) over `.json` when the source supports it — typically 5–10× smaller, parsed faster.
+- Always `preload` on mount if the animation plays on-demand: `ref.current?.play()` is instant if the asset is already decoded.
+- `autoPlay={false}` + `play()` in a `useEffect` gives control over when the first frame shows — prevents flash.
+- Don't drive `progress` with React state — it causes a JS render on every frame. Use `Animated.createAnimatedComponent(LottieView)` + `useAnimatedProps` instead.
+- On Android: Lottie renders on the main JS thread by default; for complex animations, use `renderMode="HARDWARE"` prop if available in your version.
+
+### Lottie — Web (`@lottiefiles/dotlottie-react`)
+
+The modern web player — handles `.lottie` compressed files, smaller than `lottie-web` alone.
+
+```bash
+npm install @lottiefiles/dotlottie-react
+```
+
+```tsx
+import { DotLottieReact } from '@lottiefiles/dotlottie-react'
+
+export function LottieLoader() {
+  return (
+    <DotLottieReact
+      src="/animations/loader.lottie"
+      loop
+      autoplay
+      style={{ width: 80, height: 80 }}
+    />
+  )
+}
+
+// Imperative control via ref:
+import { DotLottieReact, type DotLottie } from '@lottiefiles/dotlottie-react'
+import { useRef } from 'react'
+
+export function ControlledLottie() {
+  const dotLottieRef = useRef<DotLottie>(null)
+
+  return (
+    <>
+      <DotLottieReact
+        dotLottieRefCallback={(ref) => { dotLottieRef.current = ref }}
+        src="/animations/success.lottie"
+        loop={false}
+        style={{ width: 120, height: 120 }}
+      />
+      <button onClick={() => dotLottieRef.current?.play()}>Play</button>
+      <button onClick={() => dotLottieRef.current?.pause()}>Pause</button>
+      <button onClick={() => dotLottieRef.current?.seek(0.5)}>Seek 50%</button>
+    </>
+  )
+}
+```
+
+### Rive — React Native (`rive-react-native`)
+
+Rive is the right choice when the animation has interactive states — a button that springs between idle/hover/pressed, a character that walks vs. runs based on input, a gauge that fills.
+
+```bash
+npx expo install rive-react-native
+```
+
+```tsx
+import Rive, { Alignment, Fit, RiveRef } from 'rive-react-native'
+import { useRef } from 'react'
+
+export function RiveButton() {
+  const riveRef = useRef<RiveRef>(null)
+
+  return (
+    <Rive
+      ref={riveRef}
+      resourceName="button"          // loads from assets/button.riv
+      artboardName="Button"
+      stateMachineName="ButtonSM"
+      style={{ width: 200, height: 80 }}
+      fit={Fit.Contain}
+      alignment={Alignment.Center}
+      onPlay={() => console.log('playing')}
+    />
+  )
+}
+```
+
+**Driving Rive state machine inputs from React Native:**
+
+```tsx
+import Rive, { RiveRef } from 'rive-react-native'
+import { useRef } from 'react'
+import { Pressable } from 'react-native'
+
+export function RiveToggle() {
+  const riveRef = useRef<RiveRef>(null)
+
+  const handlePress = () => {
+    // Boolean input in the state machine
+    riveRef.current?.setInputState('ButtonSM', 'isPressed', true)
+    setTimeout(() => {
+      riveRef.current?.setInputState('ButtonSM', 'isPressed', false)
+    }, 300)
+  }
+
+  const handleHover = (active: boolean) => {
+    riveRef.current?.setInputState('ButtonSM', 'isHovered', active)
+  }
+
+  return (
+    <Pressable
+      onPress={handlePress}
+      onHoverIn={() => handleHover(true)}   // iPad pointer events
+      onHoverOut={() => handleHover(false)}
+    >
+      <Rive
+        ref={riveRef}
+        resourceName="button"
+        stateMachineName="ButtonSM"
+        style={{ width: 200, height: 80 }}
+      />
+    </Pressable>
+  )
+}
+```
+
+**Rive input types:**
+
+| Input type | Method | Use for |
+|---|---|---|
+| Boolean | `setInputState(sm, 'name', true/false)` | Toggle states, hover, focus |
+| Number | `setInputState(sm, 'name', 0.75)` | Progress bars, gauges, sliders |
+| Trigger | `fireState(sm, 'name')` | One-shot events: tap, complete, error |
+
+### Rive — Web (`@rive-app/react-canvas`)
+
+```bash
+npm install @rive-app/react-canvas
+```
+
+```tsx
+import { useRive, useStateMachineInput } from '@rive-app/react-canvas'
+
+export function RiveAvatar() {
+  const { RiveComponent, rive } = useRive({
+    src: '/animations/avatar.riv',
+    artboard: 'Avatar',
+    stateMachines: ['AvatarSM'],
+    autoplay: true,
+  })
+
+  // React to a number input (e.g. scroll progress → mouth curve)
+  const moodInput = useStateMachineInput(rive, 'AvatarSM', 'mood')
+
+  const handleScroll = (progress: number) => {
+    if (moodInput) moodInput.value = progress * 100  // 0–100
+  }
+
+  return <RiveComponent style={{ width: 200, height: 200 }} />
+}
+```
+
+**Decision table — Lottie vs Rive vs CSS/Reanimated:**
+
+| Scenario | Tool |
+|---|---|
+| Loading spinner, confetti burst, success checkmark — plays once or loops | Lottie |
+| Complex illustration with 20+ layers, AE motion curves | Lottie |
+| Button with idle/hover/pressed states | Rive |
+| Character that reacts to user input in real time | Rive |
+| Simple micro-interaction on a single element | CSS spring() / Reanimated |
+| Entrance/exit of UI components | Reanimated Layout Animations / Framer Motion |
+| Animation that must respond to live data (scroll, audio, gesture) | Reanimated + `useAnimatedProps` |
+| Designer needs to iterate without code changes | Lottie or Rive (either lets them update the asset) |
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
