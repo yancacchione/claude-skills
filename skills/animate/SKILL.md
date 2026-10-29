@@ -9435,6 +9435,134 @@ export function RiveAvatar() {
 
 ---
 
+## `useMotionValueEvent` — MotionValue Subscriptions with Auto-Cleanup (Framer Motion)
+
+The footgun: `motionValue.on('change', handler)` returns an unsubscribe function you must call in `useEffect` cleanup. Miss it and you get stale closures and memory leaks. `useMotionValueEvent` wraps this with React lifecycle automatically.
+
+```tsx
+import { useMotionValue, useMotionValueEvent, useScroll } from 'framer-motion'
+import { useState } from 'react'
+
+// Collapse a header after 80px of scroll — no useEffect, no manual cleanup
+function StickyHeader() {
+  const { scrollY } = useScroll()
+  const [collapsed, setCollapsed] = useState(false)
+
+  useMotionValueEvent(scrollY, 'change', (latest) => {
+    setCollapsed(latest > 80)
+  })
+
+  return (
+    <header style={{ height: collapsed ? 48 : 80, transition: 'height 0.2s ease-out' }}>
+      …
+    </header>
+  )
+}
+```
+
+**Events:** `'change'` fires every frame; `'animationStart'`, `'animationComplete'`, `'animationCancel'` fire at lifecycle boundaries.
+
+```tsx
+// Log when a spring settles — 'animationComplete' fires once, not every frame
+useMotionValueEvent(springValue, 'animationComplete', () => {
+  analytics.track('spring_settled', { value: springValue.get() })
+})
+
+// Drive a tooltip that only appears while the cursor is moving fast
+const mouseX = useMotionValue(0)
+
+useMotionValueEvent(mouseX, 'change', (latest) => {
+  const velocity = mouseX.getVelocity()
+  setTooltipVisible(Math.abs(velocity) > 200)
+})
+```
+
+**Rules:**
+- Always prefer `useMotionValueEvent` over `.on('change', ...)` inside components — it handles cleanup for you.
+- `useMotionValueEvent` inside a component renders synchronously with React; calling `setState` inside it is fine (React batches the update).
+- For reads that don't need to trigger re-renders, use `motionValue.on('change', cb)` in a `useEffect` (manual cleanup) or `motionValue.get()` called imperatively.
+- `'animationComplete'` fires after `withSpring`/`withDecay` settle; it will not fire if you interrupt the animation mid-flight (you get `'animationCancel'` instead).
+
+---
+
+## `useVelocity` — Physics-Based Visual Response to Motion Speed (Framer Motion)
+
+`useVelocity` derives the instantaneous velocity (px/s) of any `MotionValue`. Combined with `useTransform` and `useSpring`, it creates the "rubber band" and "momentum stretch" effects that make motion feel physical — the Emil Kowalski drag-tilt pattern.
+
+```tsx
+import { motion, useMotionValue, useVelocity, useTransform, useSpring } from 'framer-motion'
+
+// Drag card that skews in the direction of motion (rubber band drag)
+function DragCard({ children }: { children: React.ReactNode }) {
+  const x = useMotionValue(0)
+  const xVelocity = useVelocity(x)
+
+  // Smooth the noisy velocity signal first
+  const smoothVelocity = useSpring(xVelocity, { stiffness: 300, damping: 40 })
+  // Map velocity → skewX: ±1000 px/s → ±10°
+  const skewX = useTransform(smoothVelocity, [-1000, 0, 1000], [-10, 0, 10])
+
+  return (
+    <motion.div
+      drag="x"
+      dragConstraints={{ left: -200, right: 200 }}
+      style={{ x, skewX }}
+      className="cursor-grab active:cursor-grabbing"
+    >
+      {children}
+    </motion.div>
+  )
+}
+```
+
+**Scroll-stretch title** — horizontal scale follows scroll velocity:
+```tsx
+import { useScroll, useVelocity, useTransform, useSpring, motion } from 'framer-motion'
+
+function StretchTitle() {
+  const { scrollY } = useScroll()
+  const scrollVelocity = useVelocity(scrollY)
+  const smoothed = useSpring(scrollVelocity, { stiffness: 400, damping: 50 })
+
+  // Fast scroll → scale up; slow/stopped → 1.0
+  const scaleX = useTransform(smoothed, [-2000, 0, 2000], [0.85, 1, 1.15])
+
+  return (
+    <motion.h1 style={{ scaleX, originX: 0.5 }} className="font-mono">
+      Motion stretches me
+    </motion.h1>
+  )
+}
+```
+
+**Velocity-reactive blur** — motion blur approximation with CSS filter:
+```tsx
+function VelocityBlur({ children }: { children: React.ReactNode }) {
+  const y = useMotionValue(0)
+  const yVelocity = useVelocity(y)
+  const smoothV = useSpring(yVelocity, { stiffness: 500, damping: 50 })
+
+  // Map absolute velocity → blur radius: 0px at rest, 4px at 1000px/s
+  const blurPx = useTransform(smoothV, (v) => Math.min(Math.abs(v) / 250, 4))
+  const filter = useTransform(blurPx, (px) => `blur(${px.toFixed(2)}px)`)
+
+  return (
+    <motion.div drag="y" style={{ y, filter }}>
+      {children}
+    </motion.div>
+  )
+}
+```
+
+**Rules:**
+- `useVelocity` returns a `MotionValue<number>` (px/s) — always wrap in `useSpring` before mapping to style. Raw velocity is noisy.
+- Spring params for smoothing: `stiffness: 300–500`, `damping: 40–60`. Higher stiffness = faster response; higher damping = less lag tail.
+- `useVelocity(useVelocity(x))` gives acceleration — useful for warp / fisheye effects.
+- Works on any `MotionValue`, not just spatial: you can derive velocity of a progress value, a color channel, or a rotation.
+- `motionValue.getVelocity()` is the imperative read (useful inside `useMotionValueEvent` — see section above).
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
