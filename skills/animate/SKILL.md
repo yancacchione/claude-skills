@@ -926,6 +926,14 @@ The browser takes a screenshot of each named element's old bounds and new bounds
 
 ### Framer Motion (React)
 
+> **Package note (2024+):** Framer Motion was rebranded to **Motion** (npm package: `motion`). For new projects:
+> ```bash
+> npm install motion
+> ```
+> New import path: `import { motion, AnimatePresence } from 'motion/react'`
+> `LazyMotion` / `m.*` also live at `'motion/react'`.
+> The `framer-motion` package is kept in sync as a backwards-compatible alias — **existing codebases don't need to change**. All examples in this skill use `framer-motion` for readability; swap the import for new projects.
+
 ```tsx
 import { motion, AnimatePresence } from 'framer-motion'
 
@@ -6719,6 +6727,8 @@ Rules:
 ## Expo Router Screen Transitions
 
 Expo Router v3+ delegates routing to React Navigation. Custom screen animations live on `<Stack.Screen>` — either as presets or full `transitionSpec` / `cardStyleInterpolator` overrides.
+
+> **SDK 52 / Expo Router v4 note:** The default `<Stack>` now uses the native stack navigator (`react-native-screens`). The `animation` string presets below work on both native and JS stacks. The `transitionSpec` spring override **requires the JS stack** — import `createStackNavigator` from `@react-navigation/stack` (`npm install @react-navigation/stack`) and wrap Expo Router's file-based layout with it, or stay on the native stack and use `animation` presets only.
 
 ### Built-in presets (zero config)
 
