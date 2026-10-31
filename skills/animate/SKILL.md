@@ -1018,6 +1018,65 @@ When to use `useScroll` vs GSAP ScrollTrigger:
 - `useScroll` — React-native, no extra dep, composable with other motion hooks. Preferred in Next.js App Router.
 - GSAP ScrollTrigger — richer controls (scrub, pin, snap, markers), better for pinned sections and complex multi-element timelines.
 
+**`whileInView` + `viewport` prop — declarative scroll-entrance animations:**
+
+The simplest Framer Motion scroll pattern. No hooks, no refs — just a prop. Activates while the element is visible; `viewport.once: true` turns it into a one-shot entrance (the correct default for almost all scroll reveals).
+
+```tsx
+import { motion } from 'framer-motion'
+
+// One-shot entrance — animates in when visible, stays there on scroll-back
+<motion.div
+  initial={{ opacity: 0, y: 16 }}
+  whileInView={{ opacity: 1, y: 0 }}
+  viewport={{ once: true }}
+  transition={{ duration: 0.4, ease: 'easeOut' }}
+/>
+
+// Stagger a list — variants let children inherit timing automatically
+const containerVariants = {
+  hidden: {},
+  visible: { transition: { staggerChildren: 0.06, delayChildren: 0.05 } },
+}
+const itemVariants = {
+  hidden: { opacity: 0, y: 12 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: 'easeOut' } },
+}
+
+<motion.ul
+  variants={containerVariants}
+  initial="hidden"
+  whileInView="visible"
+  viewport={{ once: true }}
+>
+  {items.map(item => (
+    <motion.li key={item.id} variants={itemVariants}>{item.text}</motion.li>
+  ))}
+</motion.ul>
+```
+
+`viewport` options:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `once` | `false` | `true` = fire once only; element stays in `whileInView` state permanently after first entry. Use for almost all scroll reveals — re-animating on scroll-back is distracting. |
+| `amount` | `'some'` | How much must be visible: `0.3` = 30%, `'some'` = any pixel, `'all'` = fully visible. |
+| `margin` | `'0px'` | Like `rootMargin` on IntersectionObserver — `'-80px'` fires 80px before the element fully enters, so the animation is already running when the element becomes visible. |
+
+```tsx
+// 40% visible, fires once, triggered 60px before entering
+<motion.div
+  initial={{ opacity: 0, scale: 0.96 }}
+  whileInView={{ opacity: 1, scale: 1 }}
+  viewport={{ once: true, amount: 0.4, margin: '-60px' }}
+  transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+/>
+```
+
+`whileInView` vs `useInView`:
+- `whileInView` — declarative, zero extra code. Use for entrance animations on single elements or staggered lists.
+- `useInView` — use when visibility gates JS logic (analytics, timers) or when `animate` depends on visibility + other state.
+
 **`useMotionTemplate` — cursor-tracking glow/spotlight (phosphor aesthetic):**
 
 Builds a CSS string from motion values. The key primitive for spotlight effects, glow halos, and gradient-follows-cursor — all without re-rendering on every mouse move.
