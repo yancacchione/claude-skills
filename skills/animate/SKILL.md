@@ -5221,24 +5221,90 @@ mesh.scale.setScalar(1 + avg(data.slice(0, 8)) / 255 * 2)
 material.uniforms.uBass.value = avg(data.slice(0, 4)) / 255
 ```
 
-### React Native — Expo AV metering
+### React Native — Expo AV metering → Reanimated 3
 
-Full FFT isn't available natively in RN. Use amplitude metering for beat-driven effects:
+Full FFT isn't available natively in RN. Use amplitude metering from the microphone for beat-driven effects. A custom hook wraps `expo-av` recording with proper cleanup and exposes a `SharedValue<number>` you read directly in `useAnimatedStyle` — no JS re-renders on every meter tick.
 
 ```tsx
+import { useEffect, useRef } from 'react'
 import { Audio } from 'expo-av'
+import { useSharedValue } from 'react-native-reanimated'
 
-const { recording } = await Audio.Recording.createAsync(
-  { ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true }
-)
+// Returns a SharedValue<number> in [0, 1] tracking microphone amplitude.
+// Write from JS thread; read in useAnimatedStyle on UI thread — Reanimated handles the bridge.
+export function useAudioAmplitude(floorDb = -60, intervalMs = 50) {
+  const amplitude = useSharedValue(0)
+  const recordingRef = useRef<Audio.Recording | null>(null)
 
-recording.setOnRecordingStatusUpdate((status) => {
-  if (!status.metering) return
-  // metering is in dBFS, roughly -160 (silence) to 0 (max)
-  const level = Math.max(0, (status.metering + 60) / 60) // normalize to 0–1
-  amplitude.value = withSpring(level, { damping: 10 })
-})
+  useEffect(() => {
+    let active = true
+
+    async function start() {
+      await Audio.requestPermissionsAsync()
+      // Both flags required on iOS — missing either produces near-zero levels
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true })
+
+      const { recording } = await Audio.Recording.createAsync(
+        { ...Audio.RecordingOptionsPresets.HIGH_QUALITY, isMeteringEnabled: true },
+        (status) => {
+          if (!active || !status.isRecording || status.metering == null) return
+          // dBFS: silence ≈ floorDb, loud ≈ 0dB — normalize to 0–1
+          amplitude.value = Math.max(0, (status.metering - floorDb) / (-floorDb))
+        },
+        intervalMs
+      )
+      recordingRef.current = recording
+    }
+
+    start()
+    return () => {
+      active = false
+      recordingRef.current?.stopAndUnloadAsync()
+    }
+  }, [])
+
+  return amplitude
+}
 ```
+
+```tsx
+// Usage — scale an aura ring by microphone level
+import Animated, { useAnimatedStyle, interpolate, Extrapolation } from 'react-native-reanimated'
+import { useAudioAmplitude } from '@/hooks/useAudioAmplitude'
+
+function AuraRing() {
+  const amplitude = useAudioAmplitude()
+
+  const style = useAnimatedStyle(() => {
+    // Square root: boosts quiet sounds visually, prevents clipping on loud
+    const amp = Math.pow(amplitude.value, 0.5)
+    return {
+      transform: [{ scale: interpolate(amp, [0, 1], [1, 1.4], Extrapolation.CLAMP) }],
+      opacity:   interpolate(amp, [0, 0.15, 1], [0.3, 0.65, 1], Extrapolation.CLAMP),
+    }
+  })
+
+  return <Animated.View style={[styles.ring, style]} />
+}
+```
+
+Frequency band equivalents (no FFT in RN — approximate with single amplitude):
+
+| Web Audio API (FFT) | Expo AV equivalent |
+|---|---|
+| Bass (`0.0–0.1 UV`) | High amplitude — bass/kick-heavy content dominates metering |
+| Mids / treble | Not separable with amplitude metering alone |
+| Beat detection | `amplitude.value > 0.65` — above this is typically a transient |
+
+> **SDK 52+ alternative: `expo-audio`** — introduced as the going-forward replacement for `expo-av`'s Audio module. Same dBFS metering, cleaner hook-based API. `expo-av` still works in SDK 52; migrate when starting a new project.
+
+Rules:
+- **`Audio.requestPermissionsAsync()` first** — recording without permission silently returns near-zero on iOS, throws on Android
+- **`allowsRecordingIOS: true` + `playsInSilentModeIOS: true`** — both required on iOS; missing either causes very low levels
+- **50ms interval** (20Hz) is enough for beat-driven visuals; 100ms for ambient pulses. Lower = more CPU.
+- **`Math.pow(amplitude, 0.5)`** before mapping — square root makes quiet sounds more visible and prevents loud sounds from clamping everything at max
+- **Always call `stopAndUnloadAsync()` in cleanup** — active recordings drain battery and block audio in other apps
+- `amplitude` is a `SharedValue<number>` — read it directly in `useAnimatedStyle`, no `useAnimatedReaction` bridge needed
 
 ### Aesthetic principles for audio-reactive work
 
