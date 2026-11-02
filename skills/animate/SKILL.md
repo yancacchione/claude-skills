@@ -6931,17 +6931,15 @@ useEffect(() => {
 
 ### Shared element transitions between Expo Router screens
 
-Reanimated 3.6+ `useSharedTransition` (experimental) morphs named elements across navigation boundaries:
+Reanimated 3.6+ shared element transitions morph named `Animated.View` elements across navigation boundaries. The entire API is the `sharedTransitionTag` prop — no hook, no extra import beyond `Animated`.
 
 ```tsx
+import Animated from 'react-native-reanimated'
+
 // Source screen — list item
-import { useSharedTransition } from 'react-native-reanimated'
-
 function QuoteCard({ id, text }: { id: string; text: string }) {
-  const transition = useSharedTransition(`quote-card-${id}`)
-
   return (
-    <Animated.View style={transition.style} sharedTransitionTag={`quote-card-${id}`}>
+    <Animated.View sharedTransitionTag={`quote-card-${id}`}>
       <Text>{text}</Text>
     </Animated.View>
   )
@@ -6957,9 +6955,33 @@ function QuoteDetail({ id, text }: { id: string; text: string }) {
 }
 ```
 
-`sharedTransitionTag` is the key — matching tags on two screens triggers an automatic morph during navigation. The value must be unique per element and consistent across source and destination.
+`sharedTransitionTag` is the only required primitive — matching tags on two screens triggers an automatic morph during navigation. The value must be unique per element and consistent across source and destination.
 
-Fallback when `useSharedTransition` is unavailable: use `layoutId` from Framer Motion on web, or `Animated.createAnimatedComponent` + manual interpolation driven by `useAnimatedScrollHandler`.
+**Custom spring physics** — use `SharedTransition.custom()` with a worklet:
+
+```tsx
+import Animated, { SharedTransition, withSpring } from 'react-native-reanimated'
+
+const springTransition = SharedTransition.custom((values) => {
+  'worklet'
+  return {
+    originX: withSpring(values.targetOriginX, { damping: 20, stiffness: 200 }),
+    originY: withSpring(values.targetOriginY, { damping: 20, stiffness: 200 }),
+    width:   withSpring(values.targetWidth,   { damping: 20, stiffness: 200 }),
+    height:  withSpring(values.targetHeight,  { damping: 20, stiffness: 200 }),
+  }
+})
+
+// Apply per-element via sharedTransitionStyle
+<Animated.View
+  sharedTransitionTag={`quote-card-${id}`}
+  sharedTransitionStyle={springTransition}
+>
+```
+
+The worklet receives `values.currentOriginX/Y`, `values.currentWidth/Height` (start) and `values.targetOriginX/Y`, `values.targetWidth/Height` (end). Return the animated properties to interpolate.
+
+Fallback for older Reanimated: use `layoutId` from Framer Motion on web, or a manual `useAnimatedScrollHandler`-driven interpolation in RN.
 
 | Pattern | Tool |
 |---------|------|
