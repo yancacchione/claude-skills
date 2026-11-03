@@ -108,6 +108,35 @@ const shouldReduce = useReducedMotion()
 scale.value = shouldReduce ? targetValue : withSpring(targetValue, { damping: 15 })
 ```
 
+**`ReduceMotion` enum (Reanimated 3.3+) — per-animation reduced motion, no hook needed:**
+
+Pass `reduceMotion: ReduceMotion.System` directly in any animation config. When the system preference is enabled, `withSpring`/`withTiming` snap instantly instead of animating. Cleaner than branching on `useReducedMotion()` — no conditional in the render, works per-animation.
+
+```tsx
+import { withSpring, withTiming, ReduceMotion } from 'react-native-reanimated'
+
+// Each animation respects the system preference independently
+scale.value = withSpring(targetValue, { damping: 15, reduceMotion: ReduceMotion.System })
+opacity.value = withTiming(1, { duration: 300, reduceMotion: ReduceMotion.System })
+```
+
+`ReduceMotion` values:
+
+| Value | Behavior |
+|-------|----------|
+| `ReduceMotion.System` | Honors OS reduced-motion preference — snaps when enabled, animates when not |
+| `ReduceMotion.Always` | Always snaps immediately, regardless of system setting. Use in tests or screenshot tools |
+| `ReduceMotion.Never` | Always animates (default — what you get without passing `reduceMotion`) |
+
+Also works on layout animations:
+```tsx
+<Animated.View entering={FadeIn.reduceMotion(ReduceMotion.System)} />
+```
+
+`ReduceMotion.System` vs `useReducedMotion()`:
+- `ReduceMotion.System` — preferred for most cases. No hook, composable per-animation, no re-render coupling.
+- `useReducedMotion()` — use when you need to conditionally swap entire component structure (not just skip an animation), or read the preference synchronously before any animation runs.
+
 **Direct `window.matchMedia` check — for non-hook contexts:**
 
 Use this when you need to know the preference *before* animation state is initialized, or outside a component (e.g. in a vanilla JS scroll handler, a CSS class decision in `useEffect`, or a splash screen that must decide its reduced path on first render):
@@ -7736,17 +7765,18 @@ function SlideView({ item, index, scrollX }: { item: OnboardingSlide; index: num
 Slot this as an extra slide or a dedicated screen before `completeOnboarding()`:
 
 ```tsx
-import { Camera } from 'expo-camera'
+import { useCameraPermissions } from 'expo-camera'
 import * as Notifications from 'expo-notifications'
 
 function PermissionSlide({ onGranted, onSkipped }: { onGranted: () => void; onSkipped: () => void }) {
   const [status, setStatus] = useState<'idle' | 'asking' | 'granted' | 'denied'>('idle')
+  const [, requestCameraPermission] = useCameraPermissions()
 
   const requestCamera = async () => {
     setStatus('asking')
-    const { status } = await Camera.requestCameraPermissionsAsync()
-    setStatus(status === 'granted' ? 'granted' : 'denied')
-    if (status === 'granted') setTimeout(onGranted, 400)  // brief moment to show success state
+    const result = await requestCameraPermission()
+    setStatus(result.granted ? 'granted' : 'denied')
+    if (result.granted) setTimeout(onGranted, 400)  // brief moment to show success state
   }
 
   // Animate the icon based on status
