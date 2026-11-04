@@ -644,6 +644,97 @@ When to use vs. `pretty`:
 
 **Framer Motion + scroll-snap**: `useScroll` with `offset: ['start start', 'end end']` tracks progress *within* a snapped section — use for per-section enter animations. Don't mix GSAP ScrollTrigger `pin` with CSS scroll-snap — they conflict.
 
+**`scrollsnapchange` / `scrollsnapchanging` — native snap item transition events (Chrome 129+):**
+
+These events fire on the scroll *container* when the snapped item changes. Use them to animate quote/card content in and out without polling `scroll` events.
+
+- `scrollsnapchange` fires once after snapping completes — trigger enter animations here.
+- `scrollsnapchanging` fires every frame during the snap — use only for real-time parallax overlays, not state updates (too frequent).
+
+```ts
+// Vanilla — toggle .is-active class when snap settles
+const container = document.querySelector<HTMLElement>('.snap-container')!
+
+container.addEventListener('scrollsnapchange', (e) => {
+  const ev = e as SnapEvent
+  document.querySelector('.is-active')?.classList.remove('is-active')
+  ev.snapTargetBlock?.classList.add('is-active')
+})
+```
+
+```css
+/* Quote fades up on enter — zero JS animation code */
+.snap-item .quote-content {
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.3s ease-out, transform 0.3s ease-out;
+}
+.snap-item.is-active .quote-content {
+  opacity: 1;
+  transform: none;
+}
+```
+
+**React pattern** — `useEffect` on a container ref:
+
+```tsx
+import { useEffect, useRef, useState } from 'react'
+
+// SnapEvent not yet in TypeScript's dom lib — augment locally
+interface SnapEvent extends Event {
+  snapTargetBlock: Element | null
+  snapTargetInline: Element | null
+}
+
+function QuoteViewer({ quotes }: { quotes: Quote[] }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [activeIndex, setActiveIndex] = useState(0)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const handleSnapChange = (e: Event) => {
+      const snap = (e as SnapEvent).snapTargetBlock as HTMLElement | null
+      if (snap?.dataset.index !== undefined) {
+        setActiveIndex(parseInt(snap.dataset.index, 10))
+      }
+    }
+    el.addEventListener('scrollsnapchange', handleSnapChange)
+    return () => el.removeEventListener('scrollsnapchange', handleSnapChange)
+  }, [])
+
+  return (
+    <div ref={containerRef} className="snap-container">
+      {quotes.map((q, i) => (
+        <div key={q.id} data-index={i} className={`snap-item${i === activeIndex ? ' is-active' : ''}`}>
+          <QuoteCard quote={q} isActive={i === activeIndex} />
+        </div>
+      ))}
+    </div>
+  )
+}
+```
+
+**Cross-browser fallback** — `scrollsnapchange` is Chrome 129+ only; Safari and Firefox use IntersectionObserver instead:
+
+```ts
+function observeSnapItems(container: HTMLElement, onActive: (el: Element) => void) {
+  if ('onscrollsnapchange' in container) {
+    container.addEventListener('scrollsnapchange', (e) => {
+      const target = (e as SnapEvent).snapTargetBlock
+      if (target) onActive(target)
+    })
+    return
+  }
+  // Fallback: IntersectionObserver at 0.6 threshold
+  const io = new IntersectionObserver(
+    (entries) => entries.filter(e => e.isIntersecting).forEach(e => onActive(e.target)),
+    { root: container, threshold: 0.6 }
+  )
+  container.querySelectorAll('.snap-item').forEach(el => io.observe(el))
+}
+```
+
 **Next.js App Router** — wrap the snap container in a client component if you read `scrollY` from it; the container element itself can be server-rendered.
 
 **CSS `offset-path` — animate elements along a curved SVG path:**
@@ -873,6 +964,38 @@ export default function RootLayout({ children }) {
 
 - **Prefer View Transitions API** (native, no JS overhead) for cross-route morphs — see the View Transitions section below. Reserve Framer Motion `AnimatePresence` for within-route show/hide.
 - **`motion.div layout` + RSC**: if a component uses the `layout` prop and its parent is a Server Component, hydration mismatches can occur. Keep layout-animated trees entirely inside client components.
+
+**`template.tsx` — the correct App Router page-enter animation (Framer Motion):**
+
+`layout.tsx` reuses the same component instance across navigations — React reconciles its `children` diff, so `AnimatePresence` on a `key={pathname}` div inside a layout fires inconsistently and exit animations rarely complete before the new page loads. The correct tool is `template.tsx`: Next.js creates a *new instance* on every navigation, so `initial` always fires on enter. No `AnimatePresence`, no `usePathname`, no `key` prop needed.
+
+```tsx
+// app/template.tsx
+'use client'
+import { motion } from 'framer-motion'
+
+export default function Template({ children }: { children: React.ReactNode }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2, ease: 'easeOut' }}
+    >
+      {children}
+    </motion.div>
+  )
+}
+```
+
+The `exit` prop in `template.tsx` does not reliably fire — Next.js unmounts the template immediately when the new route renders. For exit animations use the View Transitions API instead (it handles both entry and exit natively via CSS).
+
+| | `layout.tsx` + AnimatePresence | `template.tsx` | View Transitions API |
+|---|---|---|---|
+| Enter animation | Unreliable | Yes — always fires | Yes |
+| Exit animation | Often cut off | No | Yes |
+| Shared-element morph | With layoutId | No | Yes (view-transition-name) |
+| JS overhead | Yes | Yes | Zero |
+| Use for | Persistent UI (nav, sidebar) | Simple page fades | Full route transitions |
 
 ---
 
