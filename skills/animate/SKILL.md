@@ -2976,6 +2976,69 @@ function PressableCard({ onPress, children }: { onPress: () => void; children: R
 
 Mixing `Pressable` inside a `GestureDetector` causes responder conflicts — use one or the other on the same element.
 
+**`Gesture.Fling` — Swipe-to-advance without drag tracking:**
+
+`Gesture.Pan` tracks position throughout the drag. `Gesture.Fling` only recognizes *intent* — it fires when velocity exceeds a threshold, before the finger lifts, without tracking intermediate positions. Use it for "swipe to advance" (question browser, card deck, horizontal pager) rather than "drag to position."
+
+```tsx
+import { Gesture, GestureDetector, Direction } from 'react-native-gesture-handler'
+import Animated, {
+  useSharedValue, useAnimatedStyle,
+  withTiming, withSpring, runOnJS,
+} from 'react-native-reanimated'
+import { Dimensions, StyleSheet } from 'react-native'
+
+const { width: SCREEN_W } = Dimensions.get('window')
+
+function QuestionSlide({ onNext, onPrev }: { onNext(): void; onPrev(): void }) {
+  const x       = useSharedValue(0)
+  const opacity = useSharedValue(1)
+
+  const fling = Gesture.Fling()
+    .direction(Direction.LEFT | Direction.RIGHT)
+    .onEnd((e) => {
+      'worklet'
+      const goLeft = e.velocityX < 0
+      const exit   = goLeft ? -SCREEN_W * 1.1 : SCREEN_W * 1.1
+      const enter  = goLeft ? SCREEN_W  * 0.6 : -SCREEN_W * 0.6
+
+      x.value       = withTiming(exit, { duration: 220 })
+      opacity.value = withTiming(0, { duration: 180 }, () => {
+        runOnJS(goLeft ? onNext : onPrev)()
+        x.value       = enter       // reset off-screen on the opposite side
+        opacity.value = 1
+        x.value       = withSpring(0, { damping: 22, stiffness: 200 })
+      })
+    })
+
+  return (
+    <GestureDetector gesture={fling}>
+      <Animated.View style={[styles.card, useAnimatedStyle(() => ({
+        transform: [{ translateX: x.value }],
+        opacity: opacity.value,
+      }))]} />
+    </GestureDetector>
+  )
+}
+```
+
+`Direction` values — combine with `|`: `Direction.LEFT`, `Direction.RIGHT`, `Direction.UP`, `Direction.DOWN`
+
+**Decision: `Gesture.Fling` vs `Gesture.Pan` + `withDecay`:**
+
+| Scenario | Use |
+|---|---|
+| Swipe to advance (card browser, question flow) | `Gesture.Fling` — fires on intent, no drag tracking |
+| Swipe to dismiss (bottom sheet, drawer) | `Gesture.Pan` + `withDecay` — user controls trajectory |
+| Swipe to reveal row actions | `Gesture.Pan` — snaps to revealed position |
+| Need to track drag distance for resistance | `Gesture.Pan` |
+
+Rules:
+- `Gesture.Fling` has no `onUpdate` — it doesn't track position. Add a `Gesture.Pan` if you also want drag-follow behavior.
+- Inside a `ScrollView`: `Gesture.Race(fling, Gesture.Native())` — whichever fires first wins, preventing conflicts.
+- Compose with `Gesture.Exclusive(fling, tap)` when the element also responds to taps.
+- `e.velocityX` / `e.velocityY` in `onEnd` carry the velocity at recognition time — use the sign for direction, not magnitude.
+
 **Animated `TextInput` — focus border tint + error shake:**
 
 Standard form field pattern for React Native. Extracts the animation into a reusable hook so the `TextInput` component stays clean:
@@ -9870,6 +9933,174 @@ function VelocityBlur({ children }: { children: React.ReactNode }) {
 - `useVelocity(useVelocity(x))` gives acceleration — useful for warp / fisheye effects.
 - Works on any `MotionValue`, not just spatial: you can derive velocity of a progress value, a color channel, or a rotation.
 - `motionValue.getVelocity()` is the imperative read (useful inside `useMotionValueEvent` — see section above).
+
+---
+
+## CSS Scroll-Driven Animations — `scroll()` and `view()` Timelines
+
+No JavaScript, no `useScroll`, no IntersectionObserver. These run on the compositor thread — zero main-thread cost. Browser support: Chrome 115+, Firefox 115+, Safari 18+ (partial). Always guard with `@supports`.
+
+### `animation-timeline: scroll()` — progress from container scroll position
+
+Ties animation progress to how far a scroll container has scrolled. 0% = top, 100% = bottom.
+
+```css
+/* Reading progress bar — zero JS */
+@keyframes grow {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+.progress-bar {
+  position: fixed;
+  top: 0; left: 0; width: 100%; height: 3px;
+  background: var(--accent);
+  transform-origin: left;
+  animation: grow linear both;
+  animation-timeline: scroll();   /* nearest scroll ancestor = <html> by default */
+}
+```
+
+`scroll(axis scroller)` optional args:
+- **axis**: `block` (default = vertical), `inline` (horizontal), `x`, `y`
+- **scroller**: `root` (page), `nearest` (closest scrollable ancestor), `self`
+
+### `animation-timeline: view()` — progress from element's viewport visibility
+
+Animation progress = how far the element has traveled through the viewport. 0% = just entering, 100% = just exiting. Each element has its own independent timeline.
+
+```css
+/* Fade in every section as it enters — no scroll event listener */
+@keyframes fade-up {
+  from { opacity: 0; translate: 0 20px; }
+  to   { opacity: 1; translate: none; }
+}
+
+.section {
+  animation: fade-up ease-out both;
+  animation-timeline: view();
+  animation-range: entry 0% entry 40%;
+}
+```
+
+### `animation-range` — which phase drives the animation
+
+| Keyword | Meaning | Use for |
+|---|---|---|
+| `entry 0%` | Element's leading edge crosses viewport bottom | Start entrance |
+| `entry 100%` | Element fully inside viewport | End entrance |
+| `exit 0%` | Element's leading edge crosses viewport top | Start exit |
+| `exit 100%` | Element fully gone above | End exit |
+| `cover 0%` | Same as `entry 0%` | Full journey start |
+| `cover 100%` | Same as `exit 100%` | Full journey end |
+| `contain` | While fully inside viewport | In-viewport effects |
+
+```css
+/* Entrance only — stop once fully visible */
+.reveal-card {
+  animation: fade-up ease-out both;
+  animation-timeline: view();
+  animation-range: entry 0% entry 60%;
+}
+
+/* Full parallax — element in view the entire time */
+.parallax-bg {
+  animation: parallax linear both;
+  animation-timeline: view();
+  animation-range: cover 0% cover 100%;
+}
+
+@keyframes parallax {
+  from { transform: translateY(-15%); }
+  to   { transform: translateY(15%); }
+}
+
+/* Exit: fade out as element leaves */
+.fade-out-on-exit {
+  animation: fade-down ease-in both;
+  animation-timeline: view();
+  animation-range: exit 0% exit 100%;
+}
+@keyframes fade-down {
+  to { opacity: 0; translate: 0 -12px; }
+}
+```
+
+### Stagger — no JavaScript needed
+
+With `view()`, each element's timeline fires when that element enters the viewport — natural stagger from DOM order and position, no `delay` or JS needed.
+
+```css
+/* Each item fades in as it scrolls into view — natural stagger from position */
+.list-item {
+  animation: fade-up ease-out both;
+  animation-timeline: view();
+  animation-range: entry 0% entry 50%;
+}
+```
+
+For artificial inline stagger (all items enter at the same scroll position): combine a CSS custom property with `@keyframes` delay — but prefer the natural position-based stagger above.
+
+### React / Next.js — no-JS pattern
+
+Write the CSS in `globals.css` or a CSS module. No JavaScript, no library import.
+
+```css
+/* app/globals.css */
+.scroll-reveal {
+  animation: fade-up ease-out both;
+  animation-timeline: view();
+  animation-range: entry 0% entry 40%;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; translate: 0 20px; }
+  to   { opacity: 1; translate: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-reveal { animation: none; }
+}
+```
+
+```tsx
+// app/sections/Hero.tsx
+export function Hero() {
+  return <section className="scroll-reveal">…</section>
+}
+```
+
+### Browser fallback
+
+Browsers without scroll-driven support will render the element in its `from` state (invisible) unless you add the `@supports` guard with a visible base state:
+
+```css
+/* Safe pattern: visible by default, animate only when supported */
+.scroll-reveal {
+  opacity: 1;      /* base state — visible on all browsers */
+  translate: none;
+}
+
+@supports (animation-timeline: scroll()) {
+  .scroll-reveal {
+    animation: fade-up ease-out both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 40%;
+  }
+  /* animation: both causes "from" to apply immediately — element is hidden until scroll */
+}
+```
+
+**Decision: CSS scroll-driven vs Framer Motion `useScroll`:**
+
+| Scenario | Use |
+|---|---|
+| Simple reveal, stagger list, parallax background | CSS scroll-driven — zero JS |
+| Spring physics on scroll position | Framer Motion `useScroll` + `useTransform` |
+| React state must react to scroll | Framer Motion `useMotionValueEvent` |
+| Progress bar driven by sibling's scroll | CSS `timeline-scope` (see section above) |
+| React Native scroll animations | Reanimated 3 `useScrollViewOffset` |
+| Need Safari 17 or Firefox < 115 | Framer Motion |
 
 ---
 
