@@ -2165,6 +2165,47 @@ Rules:
 - `useAnimatedReaction` = side effects when a value crosses a threshold (haptics, `runOnJS`).
 - Never call `useDerivedValue` just to trigger a JS effect — that produces silent worklet errors.
 
+**Worklet closure capture — the shared value rule:**
+
+Worklets (`useAnimatedStyle`, `useDerivedValue`, `useAnimatedReaction`, gesture handlers) run on the UI thread. They read `SharedValue.value` directly — always current. They can also capture plain JS variables from their enclosing closure, but those are **serialized to the UI thread when the worklet is registered** (each time the hook re-runs on render). If the component doesn't re-render, the worklet holds a stale JS value.
+
+Rule: **any value that must be current on the UI thread synchronously should be a `useSharedValue`, not a plain variable.**
+
+```tsx
+// FOOTGUN: threshold is a prop — won't update on the UI thread until the
+// next render re-registers the worklet (can be missed or delayed)
+const style = useAnimatedStyle(() => ({
+  opacity: scrollY.value > threshold ? 0 : 1,  // threshold is stale if no re-render
+}))
+
+// CORRECT: mirror into a SharedValue so the UI thread always reads current
+const thresholdSV = useSharedValue(threshold)
+useEffect(() => { thresholdSV.value = threshold }, [threshold])
+
+const style = useAnimatedStyle(() => ({
+  opacity: scrollY.value > thresholdSV.value ? 0 : 1,  // ✓ UI-thread read
+}))
+```
+
+Safe to leave as plain closure: constants, dimensions computed once on mount, static config. Convert to `useSharedValue` when: values change via timers/async (no guaranteed re-render), thresholds, feature flags, state machine phase, or anything read inside `runOnUI()` calls outside of a hook.
+
+**`useSharedValue` with objects — the in-place mutation footgun:**
+
+`sv.value.x = 1` mutates the object silently — Reanimated only detects a write when `sv.value` is **replaced**:
+
+```tsx
+// WRONG: mutates in place — worklets that read sv won't see the change
+position.value.x = newX
+
+// CORRECT: replace the object reference — triggers UI thread propagation
+position.value = { ...position.value, x: newX }
+
+// Or use sv.modify() — runs a worklet on the UI thread, mutates, notifies subscribers
+position.modify((v) => { 'worklet'; v.x = newX; return v })
+```
+
+`sv.modify()` is cleaner than a spread when the object is large; it avoids creating a new object and runs atomically on the UI thread.
+
 **`useAnimatedProps` — animate non-style props (SVG attributes, third-party component props):**
 
 `useAnimatedStyle` handles CSS-like View styles. `useAnimatedProps` handles everything else — SVG attributes, `BlurView` intensity, `TextInput` value, video `currentTime`, any prop that isn't a style.
