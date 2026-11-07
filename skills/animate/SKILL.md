@@ -7247,6 +7247,147 @@ Fallback for older Reanimated: use `layoutId` from Framer Motion on web, or a ma
 | Tab change animation | Custom `tabBarButton` + `withSpring` on press |
 | Cleanup infinite animations | `cancelAnimation` in `useEffect` return |
 
+### Custom animated tab bar (`tabBar` prop)
+
+Expo Router's built-in `<Tabs>` doesn't support animating the active indicator or individual tab press feedback. For either, pass a custom component via the `tabBar` prop — it replaces the entire tab bar.
+
+Wire it up in `_layout.tsx`:
+
+```tsx
+// app/(tabs)/_layout.tsx
+import { Tabs } from 'expo-router'
+import { CustomTabBar } from '@/components/CustomTabBar'
+
+export default function TabLayout() {
+  return (
+    <Tabs
+      tabBar={(props) => <CustomTabBar {...props} />}
+      screenOptions={{ headerShown: false }}
+    />
+  )
+}
+```
+
+The custom bar — spring indicator pill + per-tab press pop:
+
+```tsx
+// components/CustomTabBar.tsx
+import React, { useState } from 'react'
+import { View, Pressable, StyleSheet, LayoutChangeEvent } from 'react-native'
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring,
+  type SharedValue,
+} from 'react-native-reanimated'
+import type { BottomTabBarProps } from '@react-navigation/bottom-tabs'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
+
+// Extract each tab as its own component so useAnimatedStyle follows Rules of Hooks
+function TabItem({ scale, focused, options, onPress }: {
+  scale: SharedValue<number>
+  focused: boolean
+  options: ReturnType<BottomTabBarProps['descriptors'][string]['options']>
+  onPress: () => void
+}) {
+  const style = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }))
+  return (
+    <Pressable style={styles.tab} onPress={onPress} hitSlop={8}>
+      <Animated.View style={style}>
+        {options.tabBarIcon?.({ focused, color: focused ? '#e4e4e7' : '#52525b', size: 22 })}
+      </Animated.View>
+    </Pressable>
+  )
+}
+
+const TAB_H = 56
+
+export function CustomTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
+  const insets = useSafeAreaInsets()
+  const [tabWidth, setTabWidth] = useState(0)
+
+  // Indicator slides horizontally to the active tab
+  const indicatorX = useSharedValue(0)
+
+  // One SharedValue per slot — extend if you have > 5 tabs
+  const s0 = useSharedValue(1); const s1 = useSharedValue(1)
+  const s2 = useSharedValue(1); const s3 = useSharedValue(1)
+  const s4 = useSharedValue(1)
+  const scales = [s0, s1, s2, s3, s4]
+
+  const indicatorStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: indicatorX.value }],
+    width: tabWidth,
+  }))
+
+  const onLayout = (e: LayoutChangeEvent) => {
+    const w = e.nativeEvent.layout.width / state.routes.length
+    setTabWidth(w)
+    indicatorX.value = state.index * w  // initial position, no animation
+  }
+
+  return (
+    <View style={[styles.bar, { paddingBottom: insets.bottom }]} onLayout={onLayout}>
+      {/* Background indicator pill */}
+      <Animated.View style={[styles.pill, indicatorStyle]} />
+
+      {state.routes.map((route, i) => {
+        const { options } = descriptors[route.key]
+        const focused = state.index === i
+
+        const handlePress = () => {
+          // Press-down pop — compress, then spring back
+          scales[i].value = withSpring(0.88, { damping: 15, stiffness: 450 }, () => {
+            'worklet'
+            scales[i].value = withSpring(1, { damping: 12, stiffness: 300 })
+          })
+          // Slide indicator to this tab
+          indicatorX.value = withSpring(i * tabWidth, { damping: 22, stiffness: 220 })
+          if (!focused) navigation.navigate(route.name, {})
+        }
+
+        return (
+          <TabItem
+            key={route.key}
+            scale={scales[i]}
+            focused={focused}
+            options={options}
+            onPress={handlePress}
+          />
+        )
+      })}
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  bar: {
+    flexDirection: 'row',
+    height: TAB_H,
+    backgroundColor: '#0a0a0a',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#27272a',
+  },
+  pill: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  tab: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+})
+```
+
+Key rules:
+- **Extract `TabItem`** — `useAnimatedStyle` must be called at the top level of a component, not inside a `.map()`. Extracting each tab as its own component is the correct fix.
+- **Fixed `scales` array** — `useSharedValue` can't be called conditionally or in a loop. Declare one per slot at the top; five covers most apps.
+- **`onLayout` for `tabWidth`** — the indicator needs the actual rendered tab width, not a static constant. `onLayout` fires after the bar lays out; set `indicatorX.value` directly (no animation) on the initial call.
+- **`indicatorX.value = state.index * w`** (not `withSpring`) in `onLayout` — prevents an animated slide on first render that the user didn't trigger.
+- **`navigation.navigate(route.name, {})`** — pass an empty params object to satisfy TypeScript; Expo Router ignores it.
+- **`tabBar={...}` vs `tabBarButton`** — `tabBar` replaces the entire bar (indicator + all items). `tabBarButton` replaces only one tab's touchable, leaving the rest of the native bar intact. Use `tabBar` when you need an indicator animation; use `tabBarButton` for per-tab feedback on an otherwise native bar.
+
 ---
 
 ## Moti (Expo / React Native — declarative shorthand)
