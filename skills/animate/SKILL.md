@@ -7285,7 +7285,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 function TabItem({ scale, focused, options, onPress }: {
   scale: SharedValue<number>
   focused: boolean
-  options: ReturnType<BottomTabBarProps['descriptors'][string]['options']>
+  options: BottomTabBarProps['descriptors'][string]['options']
   onPress: () => void
 }) {
   const style = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }))
@@ -7341,7 +7341,9 @@ export function CustomTabBar({ state, descriptors, navigation }: BottomTabBarPro
           })
           // Slide indicator to this tab
           indicatorX.value = withSpring(i * tabWidth, { damping: 22, stiffness: 220 })
-          if (!focused) navigation.navigate(route.name, {})
+          // Emit tabPress — allows screens to do scroll-to-top when re-tapping the active tab
+          const event = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true })
+          if (!focused && !event.defaultPrevented) navigation.navigate(route.name, {})
         }
 
         return (
@@ -7385,6 +7387,7 @@ Key rules:
 - **Fixed `scales` array** — `useSharedValue` can't be called conditionally or in a loop. Declare one per slot at the top; five covers most apps.
 - **`onLayout` for `tabWidth`** — the indicator needs the actual rendered tab width, not a static constant. `onLayout` fires after the bar lays out; set `indicatorX.value` directly (no animation) on the initial call.
 - **`indicatorX.value = state.index * w`** (not `withSpring`) in `onLayout` — prevents an animated slide on first render that the user didn't trigger.
+- **Emit `tabPress` before navigating** — `navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true })` lets screens listen for re-taps on their own tab (e.g. scroll-to-top via `navigation.addListener('tabPress', ...)`). Check `event.defaultPrevented` before calling `navigate` so a listener can suppress it.
 - **`navigation.navigate(route.name, {})`** — pass an empty params object to satisfy TypeScript; Expo Router ignores it.
 - **`tabBar={...}` vs `tabBarButton`** — `tabBar` replaces the entire bar (indicator + all items). `tabBarButton` replaces only one tab's touchable, leaving the rest of the native bar intact. Use `tabBar` when you need an indicator animation; use `tabBarButton` for per-tab feedback on an otherwise native bar.
 
