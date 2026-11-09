@@ -7391,6 +7391,71 @@ Key rules:
 - **`navigation.navigate(route.name, {})`** — pass an empty params object to satisfy TypeScript; Expo Router ignores it.
 - **`tabBar={...}` vs `tabBarButton`** — `tabBar` replaces the entire bar (indicator + all items). `tabBarButton` replaces only one tab's touchable, leaving the rest of the native bar intact. Use `tabBar` when you need an indicator animation; use `tabBarButton` for per-tab feedback on an otherwise native bar.
 
+### Screen-side tab re-press handling — `useScrollToTop`
+
+The companion to emitting `tabPress` is listening for it on the screen side. Two patterns:
+
+**Pattern 1: `useScrollToTop` — zero-config automatic scroll**
+
+Pass a ref to a `ScrollView`, `FlatList`, or `FlashList` and the hook wires scroll-to-top on tab re-press automatically. Works with both native and custom tab bars as long as the tab bar emits `tabPress`.
+
+```tsx
+import { useRef } from 'react'
+import { ScrollView } from 'react-native'
+import { useScrollToTop } from '@react-navigation/native'
+
+export default function HomeScreen() {
+  const scrollRef = useRef<ScrollView>(null)
+  useScrollToTop(scrollRef)  // fires on tab re-press — that's the whole hook
+
+  return (
+    <ScrollView ref={scrollRef}>
+      {/* content */}
+    </ScrollView>
+  )
+}
+```
+
+For `FlatList` / `FlashList` — the hook calls `scrollToOffset({ offset: 0, animated: true })`, which both list types support:
+
+```tsx
+import { FlatList } from 'react-native'
+import { useScrollToTop } from '@react-navigation/native'
+
+const listRef = useRef<FlatList>(null)
+useScrollToTop(listRef)
+```
+
+**Pattern 2: `navigation.addListener('tabPress', ...)` — custom behavior on re-tap**
+
+Use when scroll-to-top isn't enough — resetting a search field, collapsing a panel, or triggering a Reanimated animation:
+
+```tsx
+import { useNavigation } from 'expo-router'
+import { useEffect } from 'react'
+import { Keyboard } from 'react-native'
+import { withSpring } from 'react-native-reanimated'
+
+export default function SearchScreen() {
+  const navigation = useNavigation()
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('tabPress', () => {
+      searchQuery.value = ''           // reset a shared value
+      scrollY.value = withSpring(0, { damping: 20, stiffness: 200 })
+      Keyboard.dismiss()
+    })
+    return unsubscribe  // cleanup removes the listener on unmount
+  }, [navigation])
+}
+```
+
+Key points:
+- **`useScrollToTop` vs `addListener`** — prefer `useScrollToTop` when scroll is all you need: one import, zero effect cleanup, handles list types automatically.
+- **Both patterns require the custom bar to emit `tabPress`** — if `navigation.emit` is missing from `handlePress`, neither fires. The `CustomTabBar` above emits it correctly.
+- **Don't call `e.preventDefault()` in the listener** unless the screen must block navigation (rare). Calling it suppresses the tab switch even when the user taps a *different* tab.
+- **`tabPress` only fires when the tab is already focused** (re-tap). It does not fire on initial navigation to that tab.
+
 ---
 
 ## Moti (Expo / React Native — declarative shorthand)
