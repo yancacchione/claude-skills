@@ -10354,6 +10354,286 @@ Browsers without scroll-driven support will render the element in its `from` sta
 
 ---
 
+## `useDerivedValue` — Pure Reactive Computation on the UI Thread (Reanimated 3)
+
+`useDerivedValue` runs a worklet **on the UI thread** whenever its shared value dependencies change. Use it to transform shared values without touching the React render cycle. The key distinction: `useDerivedValue` returns a new `SharedValue` you can pass to other hooks or use in multiple `useAnimatedStyle` calls; `useAnimatedStyle` returns a style object for one component only.
+
+```tsx
+import { useSharedValue, useDerivedValue, useAnimatedStyle, withSpring } from 'react-native-reanimated'
+
+// scrollY drives two separate components without duplicating the derivation
+const headerOpacity = useDerivedValue(() =>
+  // runs on UI thread — no bridge cost, no React re-render
+  scrollY.value > 80 ? withSpring(0) : withSpring(1)
+)
+
+const headerStyle  = useAnimatedStyle(() => ({ opacity: headerOpacity.value }))
+const avatarStyle  = useAnimatedStyle(() => ({ opacity: headerOpacity.value }))
+```
+
+**When to use `useDerivedValue` vs computing inside `useAnimatedStyle`:**
+
+| Scenario | Use |
+|---|---|
+| One style, one component | Compute directly in `useAnimatedStyle` |
+| Same derived value used in 2+ `useAnimatedStyle` calls | `useDerivedValue` — compute once, share |
+| Need to pass the derived value as a prop or dependency | `useDerivedValue` returns a `SharedValue` |
+| Multi-step chain (scroll → progress → several outputs) | `useDerivedValue` at each step keeps things readable |
+
+**Chaining derived values:**
+
+```tsx
+// scrollY → 0–1 progress → header opacity + tab bar translate + parallax offset
+const scrollProgress = useDerivedValue(() =>
+  Math.min(scrollY.value / COLLAPSE_DISTANCE, 1)
+)
+
+const headerOpacity    = useDerivedValue(() => 1 - scrollProgress.value)
+const tabBarTranslateY = useDerivedValue(() => scrollProgress.value * TAB_H)
+const parallaxOffset   = useDerivedValue(() => scrollProgress.value * -30)
+
+const tabBarStyle = useAnimatedStyle(() => ({
+  transform: [{ translateY: tabBarTranslateY.value }],
+}))
+```
+
+**Gotcha — only shared value reads trigger re-computation:**
+
+```tsx
+// WRONG — `items.length` is a plain JS value; changing it won't re-run the worklet
+const height = useDerivedValue(() => items.length * ROW_H)
+
+// CORRECT — read from a SharedValue inside the worklet
+const height = useDerivedValue(() => itemCount.value * ROW_H)
+```
+
+React state does not trigger `useDerivedValue`. Sync state into a `useSharedValue` via `useEffect`, then derive from that.
+
+---
+
+## `interpolate` / `interpolateColor` — Range Mapping (Reanimated 3)
+
+The core building block for scroll-driven and gesture-driven animations. Maps an input range to an output range — scroll position to opacity, gesture progress to scale, any value to any value. Runs on the UI thread inside worklets.
+
+### `interpolate` — numeric ranges
+
+```tsx
+import { interpolate, Extrapolation } from 'react-native-reanimated'
+
+// scrollY 0–200 → opacity 1–0 (header fades out as you scroll)
+const headerStyle = useAnimatedStyle(() => ({
+  opacity: interpolate(
+    scrollY.value,
+    [0, 200],             // input range
+    [1, 0],               // output range
+    Extrapolation.CLAMP   // clamp: prevent going below 0 when scroll > 200
+  ),
+}))
+```
+
+**Multiple segments — non-linear mapping:**
+
+```tsx
+// Scale: normal at 0, tiny grow at 50, shrinks on deep scroll
+const cardStyle = useAnimatedStyle(() => ({
+  transform: [{
+    scale: interpolate(
+      scrollY.value,
+      [-50,   0,    50,  200],
+      [1.05,  1,   0.95, 0.8],
+      Extrapolation.CLAMP
+    ),
+  }],
+}))
+```
+
+**`Extrapolation` options:**
+
+| Value | Behavior beyond the input range |
+|---|---|
+| `Extrapolation.CLAMP` | Holds the first/last output value — almost always correct |
+| `Extrapolation.EXTEND` | Continues linearly past the range |
+| `Extrapolation.IDENTITY` | Returns the input value unchanged |
+
+For independent left/right: `{ extrapolateLeft: Extrapolation.CLAMP, extrapolateRight: Extrapolation.EXTEND }`.
+
+### `interpolateColor` — smooth color transitions
+
+```tsx
+import { interpolateColor } from 'react-native-reanimated'
+
+// Background shifts dark as you scroll
+const backgroundStyle = useAnimatedStyle(() => ({
+  backgroundColor: interpolateColor(
+    scrollY.value,
+    [0, 300],
+    ['#ffffff', '#09090b']
+  ),
+}))
+
+// Tri-stop accent shift
+const accentStyle = useAnimatedStyle(() => ({
+  color: interpolateColor(
+    progress.value,
+    [0, 0.5, 1],
+    ['#3b82f6', '#8b5cf6', '#ec4899']
+  ),
+}))
+```
+
+`interpolateColor` defaults to `'RGB'`. Pass `{ gamma: 2.2 }` as a fourth argument for perceptually smoother transitions.
+
+**Common patterns:**
+
+```tsx
+// Collapsible header — height + opacity from one scroll value
+const HEADER_MAX = 120, HEADER_MIN = 56
+
+const headerStyle = useAnimatedStyle(() => {
+  const h       = interpolate(scrollY.value, [0, 80], [HEADER_MAX, HEADER_MIN], Extrapolation.CLAMP)
+  const opacity = interpolate(scrollY.value, [0, 60], [1, 0], Extrapolation.CLAMP)
+  return { height: h, opacity }
+})
+
+// Pull-to-refresh indicator
+const refreshStyle = useAnimatedStyle(() => ({
+  transform: [{
+    scale: interpolate(overscroll.value, [0, 80], [0, 1], Extrapolation.CLAMP),
+  }],
+  opacity: interpolate(overscroll.value, [0, 40], [0, 1], Extrapolation.CLAMP),
+}))
+```
+
+**`interpolate` vs Framer Motion `useTransform`:**
+Same concept, different syntax. In Reanimated: `interpolate(sv.value, inputRange, outputRange)` inside `useAnimatedStyle`. In Framer Motion: `useTransform(motionValue, inputRange, outputRange)` returns a derived `MotionValue`.
+
+---
+
+## Animated Tab Bar Badge — Notification Count (Expo Router + Reanimated 3)
+
+Add-on to the `CustomTabBar` above. The badge springs in when `count > 0` and springs out when it clears. Number changes animate with a quick vertical flip.
+
+```tsx
+// components/AnimatedBadge.tsx
+import React, { useEffect } from 'react'
+import { StyleSheet } from 'react-native'
+import Animated, {
+  useSharedValue, useAnimatedStyle,
+  withSpring, withSequence, withTiming,
+  interpolate, Extrapolation,
+} from 'react-native-reanimated'
+
+export function AnimatedBadge({ count }: { count: number }) {
+  const scale = useSharedValue(0)
+  const flipY = useSharedValue(0)  // 0 = visible, -1 = coming from below, 1 = exiting up
+
+  // Spring in when count appears; spring out when cleared
+  useEffect(() => {
+    scale.value = count > 0
+      ? withSpring(1, { damping: 14, stiffness: 280 })
+      : withSpring(0, { damping: 18, stiffness: 220 })
+  }, [count > 0])
+
+  // Flip the number on count change (while badge is already visible)
+  useEffect(() => {
+    if (count <= 0) return
+    flipY.value = withSequence(
+      withTiming(1,  { duration: 80 }),   // old number exits upward
+      withTiming(-1, { duration: 0  }),   // snap new number in from below
+      withSpring(0,  { damping: 20, stiffness: 400 })  // settle
+    )
+  }, [count])
+
+  const containerStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }))
+
+  const numberStyle = useAnimatedStyle(() => ({
+    transform: [{
+      translateY: interpolate(flipY.value, [-1, 0, 1], [6, 0, -6], Extrapolation.CLAMP),
+    }],
+    opacity: interpolate(flipY.value, [-1, -0.3, 0, 0.3, 1], [0, 1, 1, 1, 0]),
+  }))
+
+  if (count <= 0) return null  // hooks ran above; safe early return
+
+  return (
+    <Animated.View style={[styles.badge, containerStyle]}>
+      <Animated.Text style={[styles.text, numberStyle]}>
+        {count > 99 ? '99+' : count}
+      </Animated.Text>
+    </Animated.View>
+  )
+}
+
+const styles = StyleSheet.create({
+  badge: {
+    position: 'absolute',
+    top: -4, right: -6,
+    minWidth: 16, height: 16,
+    paddingHorizontal: 3,
+    borderRadius: 8,
+    backgroundColor: '#ef4444',
+    alignItems: 'center', justifyContent: 'center',
+    zIndex: 1,
+  },
+  text: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '600',
+    lineHeight: 12,
+  },
+})
+```
+
+Wire it into `TabItem` in `CustomTabBar`:
+
+```tsx
+function TabItem({ scale, focused, options, onPress, badgeCount }: {
+  scale: SharedValue<number>
+  focused: boolean
+  options: BottomTabBarProps['descriptors'][string]['options']
+  onPress: () => void
+  badgeCount?: number
+}) {
+  const style = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }))
+  return (
+    <Pressable style={styles.tab} onPress={onPress} hitSlop={8}>
+      <Animated.View style={[style, { position: 'relative' }]}>
+        {options.tabBarIcon?.({ focused, color: focused ? '#e4e4e7' : '#52525b', size: 22 })}
+        {badgeCount !== undefined && <AnimatedBadge count={badgeCount} />}
+      </Animated.View>
+    </Pressable>
+  )
+}
+```
+
+Pass badge counts from your store in `CustomTabBar`:
+
+```tsx
+const badgeCounts: Record<string, number> = {
+  inbox: unreadCount,  // from Zustand / Supabase realtime subscription
+}
+
+// Inside route.map:
+<TabItem
+  key={route.key}
+  scale={scales[i]}
+  focused={focused}
+  options={options}
+  onPress={handlePress}
+  badgeCount={badgeCounts[route.name]}
+/>
+```
+
+Key points:
+- **Two separate `useEffect` calls** — one for `count > 0` (spring in/out), one for the count value (flip). Combining them causes the flip to fire when the badge first appears.
+- **`if (count <= 0) return null` after all hooks** — hooks run unconditionally; the early return is safe only after both `useEffect` calls.
+- **`minWidth` not `width`** — `minWidth: 16` with `paddingHorizontal: 3` lets the badge expand naturally for two-digit counts.
+- **Spring to `scale: 0`, not `display: none`** — the spring-out must be able to play; set `count` to 0 and let the hook animate out before the component disappears.
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
