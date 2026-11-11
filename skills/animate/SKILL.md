@@ -10634,6 +10634,205 @@ Key points:
 
 ---
 
+## `withSequence` / `withDelay` / `withRepeat` — Composing Animations (Reanimated 3)
+
+The three orchestration primitives. They wrap individual `withSpring`/`withTiming` calls and compose into multi-step animation chains, all running on the UI thread.
+
+### `withSequence` — play animations one after another
+
+```tsx
+import { withSequence, withTiming, withSpring } from 'react-native-reanimated'
+
+// Bump scale up, then spring back — single assignment
+scale.value = withSequence(
+  withTiming(1.15, { duration: 80 }),  // quick grow
+  withSpring(1, { damping: 14, stiffness: 300 })  // spring settle
+)
+
+// Badge flip from AnimatedBadge: exit → snap → enter
+flipY.value = withSequence(
+  withTiming(1,  { duration: 80 }),   // old number exits upward
+  withTiming(-1, { duration: 0  }),   // instant snap to below
+  withSpring(0,  { damping: 20, stiffness: 400 })  // spring in
+)
+```
+
+Each argument to `withSequence` runs only after the previous one completes. If the shared value is reassigned mid-sequence, the sequence cancels.
+
+### `withDelay` — wait, then animate
+
+```tsx
+import { withDelay, withTiming } from 'react-native-reanimated'
+
+// Stagger children: each item delays 60ms more than the previous
+items.forEach((_, i) => {
+  opacity[i].value = withDelay(i * 60, withTiming(1, { duration: 300 }))
+})
+```
+
+`withDelay(ms, animation)` nests — wrap any animation with it. Combine with `withSequence` for staged stagger-then-move effects:
+
+```tsx
+translateY.value = withDelay(
+  index * 50,
+  withSequence(
+    withTiming(-8, { duration: 120 }),
+    withSpring(0, { damping: 12, stiffness: 180 })
+  )
+)
+```
+
+### `withRepeat` — loop an animation
+
+```tsx
+import { withRepeat, withTiming, withSequence } from 'react-native-reanimated'
+
+// Pulse indefinitely (reverse: true means ping-pong back to start)
+opacity.value = withRepeat(
+  withTiming(0.4, { duration: 800 }),
+  -1,     // -1 = infinite; positive int = exact count
+  true    // reverse: ping-pong instead of snapping back
+)
+
+// Shimmer skeleton: translate from -1 to 1 screen width, repeat
+translateX.value = withRepeat(
+  withTiming(SCREEN_W, { duration: 1200 }),
+  -1,
+  false  // don't reverse — always LTR sweep
+)
+
+// Three attention shakes then stop
+translateX.value = withSequence(
+  withRepeat(withTiming(6, { duration: 60 }), 3, true),
+  withTiming(0, { duration: 80 })
+)
+```
+
+### Interruption behaviour
+
+Assigning a new value mid-sequence cancels the sequence immediately — no need to cancel manually. This makes gestures and state changes feel responsive:
+
+```tsx
+// User taps again mid-animation — just re-assign; old sequence is gone
+onPress={() => {
+  scale.value = withSequence(
+    withTiming(0.92, { duration: 80 }),
+    withSpring(1, { damping: 14, stiffness: 300 })
+  )
+}}
+```
+
+`cancelAnimation(sv)` stops all pending animations and leaves the value at its current position. Use it when unmounting a component that's mid-animation to avoid the "component unmounted" warning.
+
+```tsx
+import { cancelAnimation } from 'react-native-reanimated'
+
+useEffect(() => {
+  return () => cancelAnimation(shimmerX)  // cleanup on unmount
+}, [])
+```
+
+---
+
+## `useAnimatedReaction` — UI-Thread Side Effects (Reanimated 3)
+
+The companion to `useDerivedValue`. Where `useDerivedValue` computes a new shared value, `useAnimatedReaction` fires a side-effect worklet when a value changes. Use it to trigger haptics, bridge to `setState`, or fire analytics events when an animated threshold is crossed — all from the UI thread.
+
+```tsx
+import { useAnimatedReaction, runOnJS } from 'react-native-reanimated'
+
+useAnimatedReaction(
+  () => scrollY.value,            // selector: runs on UI thread, return the value to watch
+  (current, previous) => {
+    'worklet'
+    // `previous` is null on the first run, then the previous selector result
+    if (current > 100 && (previous ?? 0) <= 100) {
+      runOnJS(setHeaderCollapsed)(true)
+    }
+    if (current <= 100 && (previous ?? 0) > 100) {
+      runOnJS(setHeaderCollapsed)(false)
+    }
+  }
+)
+```
+
+### Full signature
+
+```tsx
+useAnimatedReaction(
+  prepare,    // () => T — selector worklet, runs on UI thread
+  react,      // (current: T, previous: T | null) => void — reaction worklet
+  deps?       // dependency array — reruns when deps change (like useEffect)
+)
+```
+
+### Common patterns
+
+**Haptics on gesture snap:**
+
+```tsx
+import * as Haptics from 'expo-haptics'
+
+useAnimatedReaction(
+  () => snapIndex.value,
+  (current, previous) => {
+    if (current !== previous && previous !== null) {
+      runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Light)
+    }
+  }
+)
+```
+
+**Analytics event on scroll depth:**
+
+```tsx
+const fired25 = useSharedValue(false)
+
+useAnimatedReaction(
+  () => scrollY.value / CONTENT_HEIGHT,
+  (progress) => {
+    if (progress >= 0.25 && !fired25.value) {
+      fired25.value = true
+      runOnJS(trackScrollDepth)(25)
+    }
+  }
+)
+```
+
+**Tab change triggers a Reanimated transition (no bridge needed):**
+
+```tsx
+// When activeIndex changes, animate the indicator directly on the UI thread
+useAnimatedReaction(
+  () => activeIndex.value,
+  (index) => {
+    indicatorX.value = withSpring(index * TAB_WIDTH, { damping: 18, stiffness: 250 })
+  }
+)
+```
+
+### Rules and gotchas
+
+| Do | Don't |
+|---|---|
+| Use for threshold-based side effects | Use for derived styles — that's `useAnimatedStyle` |
+| Use `runOnJS` for any JS function call | Call JS functions directly inside the reaction |
+| Use `previous` to detect the crossing direction | Forget `previous` starts as `null` on first run |
+| Mirror React state into shared values via `useEffect` before reacting to them | React to plain JS variables expecting them to be live |
+
+**`previous` is `null` on the first run** — always guard with `previous !== null` or `?? fallback` to avoid spurious triggers on mount.
+
+**`useAnimatedReaction` vs `useEffect`:**
+
+| `useEffect` | `useAnimatedReaction` |
+|---|---|
+| JS thread | UI thread |
+| Re-renders trigger it | Shared value changes trigger it |
+| Access React state directly | Need `runOnJS` to reach React state |
+| Good for one-time setup | Good for continuous threshold monitoring |
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
