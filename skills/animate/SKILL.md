@@ -10833,6 +10833,94 @@ useAnimatedReaction(
 
 ---
 
+## Expand / Collapse to Unknown Height (Reanimated 3)
+
+The React Native equivalent of CSS `interpolate-size`. When content height isn't known at render time — accordions, expandable rows, "read more" cards, expandable notifications — measure it once with `onLayout`, then animate the outer container.
+
+### Pattern: measure once, animate with spring
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring,
+} from 'react-native-reanimated'
+import { LayoutChangeEvent, View, Pressable, Text } from 'react-native'
+import { useState, useEffect } from 'react'
+
+function ExpandableCard({ title, children }: { title: string; children: React.ReactNode }) {
+  const [expanded, setExpanded] = useState(false)
+  const measuredHeight = useSharedValue(0)
+  const animatedHeight = useSharedValue(0)
+  const isExpanded = useSharedValue(false)
+
+  const onContentLayout = (e: LayoutChangeEvent) => {
+    const h = e.nativeEvent.layout.height
+    if (measuredHeight.value === 0 && h > 0) {
+      measuredHeight.value = h
+    }
+  }
+
+  const handleToggle = () => {
+    const next = !expanded
+    setExpanded(next)
+    isExpanded.value = next
+    animatedHeight.value = withSpring(next ? measuredHeight.value : 0, {
+      damping: 20,
+      stiffness: 200,
+      overshootClamping: true,  // prevent height going negative on collapse
+    })
+  }
+
+  const containerStyle = useAnimatedStyle(() => ({
+    height: animatedHeight.value,
+    overflow: 'hidden',
+  }))
+
+  return (
+    <View>
+      <Pressable onPress={handleToggle}>
+        <Text>{title}</Text>
+      </Pressable>
+      <Animated.View style={containerStyle}>
+        {/* Inner View sizes naturally; outer Animated.View clips it */}
+        <View onLayout={onContentLayout}>{children}</View>
+      </Animated.View>
+    </View>
+  )
+}
+```
+
+**Why `overshootClamping: true` on collapse?** A spring that overshoots below 0 makes `height` briefly negative — `overflow: 'hidden'` clips it into a snap, not a smooth settle.
+
+### Gotchas
+
+| Issue | Fix |
+|---|---|
+| `measuredHeight` is 0 on first toggle | Guard `if (h > 0)` in `onContentLayout` — `onLayout` fires before the first press, so the value is ready |
+| Content reflows when it dynamically changes (text wraps, image loads) | Reset `measuredHeight.value = 0` so the next `onLayout` re-measures the new height |
+| Jank on very first open (content visible before spring starts) | The `overflow: 'hidden'` on `containerStyle` clips during spring — no flash; `animatedHeight` starts at 0 |
+| `expanded` JS state is out of sync with the shared value | Don't read `expanded` inside worklets — use `isExpanded` shared value instead |
+
+### Paired: animated chevron (derived from shared value)
+
+```tsx
+import { useDerivedValue, useAnimatedStyle, withSpring } from 'react-native-reanimated'
+
+// isExpanded is the useSharedValue<boolean> from above
+const rotation = useDerivedValue(() =>
+  withSpring(isExpanded.value ? 180 : 0, { damping: 18, stiffness: 250 })
+)
+
+const chevronStyle = useAnimatedStyle(() => ({
+  transform: [{ rotate: `${rotation.value}deg` }],
+}))
+
+// <Animated.View style={chevronStyle}><ChevronDown size={16} /></Animated.View>
+```
+
+**Don't** derive rotation from JS `useState` — it isn't reactive on the UI thread. Always bridge via a `useSharedValue` as shown above.
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
