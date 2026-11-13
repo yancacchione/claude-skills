@@ -10921,6 +10921,196 @@ const chevronStyle = useAnimatedStyle(() => ({
 
 ---
 
+## Double-Tap to Like — `Gesture.Exclusive` + Heart Burst (Reanimated 3)
+
+The canonical Instagram-style double-tap: a heart bursts at the tap location, then fades. Without `Gesture.Exclusive`, the single-tap handler fires immediately — the OS doesn't wait to see if a second tap follows. `Gesture.Exclusive(doubleTap, singleTap)` holds the single-tap until the double-tap window closes (~300ms), then dispatches whichever matched.
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring, withTiming,
+  withSequence, runOnJS,
+} from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import { View, StyleSheet } from 'react-native'
+import { useState } from 'react'
+
+function LikeableCard({ children }: { children: React.ReactNode }) {
+  const [liked, setLiked] = useState(false)
+  const heartScale = useSharedValue(0)
+  const heartOpacity = useSharedValue(0)
+  const [tapPos, setTapPos] = useState({ x: 0, y: 0 })
+
+  const doubleTap = Gesture.Tap()
+    .numberOfTaps(2)
+    .onStart((e) => {
+      runOnJS(setTapPos)({ x: e.x, y: e.y })
+      runOnJS(setLiked)(true)
+      // Burst: scale up fast, then settle back to 0
+      heartScale.value = withSequence(
+        withSpring(1.4, { damping: 10, stiffness: 400 }),
+        withSpring(1.0, { damping: 14, stiffness: 300 }),
+        withTiming(0, { duration: 400 })
+      )
+      heartOpacity.value = withSequence(
+        withTiming(1, { duration: 60 }),
+        withTiming(0, { duration: 400 })
+      )
+    })
+
+  // Single-tap fires ONLY when double-tap was NOT recognized
+  const singleTap = Gesture.Tap()
+    .numberOfTaps(1)
+    .onStart(() => {
+      // e.g. navigate to detail — only fires when it wasn't a double-tap
+    })
+
+  // Exclusive: if doubleTap wins, singleTap is cancelled and never fires
+  const composed = Gesture.Exclusive(doubleTap, singleTap)
+
+  const heartStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: heartScale.value }],
+    opacity: heartOpacity.value,
+  }))
+
+  return (
+    <GestureDetector gesture={composed}>
+      <View style={styles.card}>
+        {children}
+        {/* Heart overlay — positioned at tap location */}
+        <Animated.Text
+          style={[styles.heart, heartStyle, { left: tapPos.x - 24, top: tapPos.y - 24 }]}
+        >
+          ❤️
+        </Animated.Text>
+      </View>
+    </GestureDetector>
+  )
+}
+
+const styles = StyleSheet.create({
+  card: { overflow: 'hidden' },
+  heart: { position: 'absolute', fontSize: 48, pointerEvents: 'none' },
+})
+```
+
+### `Gesture.Exclusive` rule
+
+`Gesture.Exclusive(a, b, ...)` — the **first** gesture to activate wins; all others are immediately cancelled. Priority is the order you pass them: first argument = highest priority.
+
+| Composition | Behaviour |
+|---|---|
+| `Gesture.Simultaneous(a, b)` | Both run at the same time — pan + pinch, tap + rotate |
+| `Gesture.Exclusive(a, b)` | First to activate wins, rest are cancelled — double-tap vs single-tap |
+| `Gesture.Race(a, b)` | First to **begin** wins — pan vs native scroll conflict |
+
+**Key rule for double-tap vs single-tap**: always put `doubleTap` first in `Exclusive`. If you put `singleTap` first, it activates before the second tap arrives and the double-tap is never recognized.
+
+### Lightweight variant (no tap location, shared state)
+
+When you only need a quick scale burst on the item (no floating heart at cursor position):
+
+```tsx
+const doubleTap = Gesture.Tap()
+  .numberOfTaps(2)
+  .onStart(() => {
+    scale.value = withSequence(
+      withSpring(1.15, { damping: 10, stiffness: 500 }),
+      withSpring(1.0, { damping: 14, stiffness: 300 })
+    )
+    runOnJS(setLiked)((prev) => !prev)
+  })
+```
+
+---
+
+## Animated Expo SplashScreen — Fade Out Native → Custom Intro
+
+Expo's native splash screen (from `app.json`) shows before JavaScript loads. The pattern: keep the native splash visible with `SplashScreen.preventAutoHideAsync()`, render your own animated layer underneath it, then `SplashScreen.hideAsync()` once assets load — users see only the custom animation, not a flash between native and JS splash.
+
+```tsx
+// app/_layout.tsx
+import { useEffect } from 'react'
+import * as SplashScreen from 'expo-splash-screen'
+import { useFonts } from 'expo-font'
+import Animated, { useSharedValue, useAnimatedStyle, withTiming, runOnJS } from 'react-native-reanimated'
+import { View, StyleSheet } from 'react-native'
+
+SplashScreen.preventAutoHideAsync()
+
+export default function RootLayout() {
+  const [fontsLoaded] = useFonts({ 'JetBrainsMono-Variable': require('../assets/fonts/JetBrainsMono.ttf') })
+  const splashOpacity = useSharedValue(1)
+
+  useEffect(() => {
+    if (!fontsLoaded) return
+
+    const hideSplash = async () => {
+      await SplashScreen.hideAsync()  // dismisses the NATIVE splash
+      // Now fade out OUR custom layer
+      splashOpacity.value = withTiming(0, { duration: 600 })
+    }
+
+    hideSplash()
+  }, [fontsLoaded])
+
+  const overlayStyle = useAnimatedStyle(() => ({
+    opacity: splashOpacity.value,
+    // pointerEvents: 'none' once fading to let touches reach the app underneath
+  }))
+
+  return (
+    <View style={styles.root}>
+      {/* App renders here behind the overlay */}
+      <Stack />
+      {/* Custom splash overlay — fades out after assets load */}
+      <Animated.View style={[StyleSheet.absoluteFill, styles.splash, overlayStyle]} pointerEvents="none">
+        <SplashLogo />  {/* your brand animation here */}
+      </Animated.View>
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1 },
+  splash: { backgroundColor: '#0a0a0a', alignItems: 'center', justifyContent: 'center', zIndex: 999 },
+})
+```
+
+### Sequenced logo animation on the custom splash
+
+```tsx
+function SplashLogo() {
+  const scale = useSharedValue(0.85)
+  const opacity = useSharedValue(0)
+
+  useEffect(() => {
+    // Stagger: fade in, then scale up with spring
+    opacity.value = withTiming(1, { duration: 300 })
+    scale.value = withSpring(1, { damping: 14, stiffness: 200, delay: 100 })
+  }, [])
+
+  const style = useAnimatedStyle(() => ({
+    opacity: opacity.value,
+    transform: [{ scale: scale.value }],
+  }))
+
+  return <Animated.Text style={[styles.logoText, style]}>y</Animated.Text>
+}
+```
+
+### Gotchas
+
+| Issue | Fix |
+|---|---|
+| Flash of white between native splash and JS layer | Ensure native splash `backgroundColor` in `app.json` matches your JS overlay background exactly |
+| Native splash hides before fonts load | Don't call `hideAsync()` until `fontsLoaded && assetsLoaded` |
+| Animation runs but nothing visible | Check that `zIndex: 999` and `position: 'absolute'` are both set on the overlay |
+| `SplashScreen.hideAsync()` called twice (Strict Mode) | Wrap in a ref guard: `if (hidden.current) return; hidden.current = true; await hideAsync()` |
+
+**Timing rule**: hide the native splash as soon as minimum assets are loaded. Don't wait for all network data — the custom animated overlay buys you the extra 600ms cover without the user noticing.
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
