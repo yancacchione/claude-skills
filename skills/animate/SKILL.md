@@ -11086,7 +11086,7 @@ function SplashLogo() {
   useEffect(() => {
     // Stagger: fade in, then scale up with spring
     opacity.value = withTiming(1, { duration: 300 })
-    scale.value = withSpring(1, { damping: 14, stiffness: 200, delay: 100 })
+    scale.value = withDelay(100, withSpring(1, { damping: 14, stiffness: 200 }))
   }, [])
 
   const style = useAnimatedStyle(() => ({
@@ -11108,6 +11108,125 @@ function SplashLogo() {
 | `SplashScreen.hideAsync()` called twice (Strict Mode) | Wrap in a ref guard: `if (hidden.current) return; hidden.current = true; await hideAsync()` |
 
 **Timing rule**: hide the native splash as soon as minimum assets are loaded. Don't wait for all network data — the custom animated overlay buys you the extra 600ms cover without the user noticing.
+
+---
+
+## `useAnimatedKeyboard` — Keyboard-Aware Layouts (Reanimated 3)
+
+`KeyboardAvoidingView` guesses the keyboard offset and snaps — `useAnimatedKeyboard` reads the real keyboard height on the UI thread and animates the layout smoothly using the same spring as the system keyboard. Use it whenever content needs to shift (chat inputs, comment bars, search sheets) in Expo / React Native apps.
+
+```tsx
+import Animated, {
+  useAnimatedKeyboard,
+  useAnimatedStyle,
+  KeyboardState,
+} from 'react-native-reanimated'
+
+function ChatInput() {
+  const keyboard = useAnimatedKeyboard()
+
+  // This style lifts the input bar exactly as the keyboard rises/falls
+  const containerStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: -keyboard.height.value }],
+  }))
+
+  return (
+    <Animated.View style={[styles.inputBar, containerStyle]}>
+      <TextInput placeholder="Message…" />
+    </Animated.View>
+  )
+}
+```
+
+`keyboard.height` is a `SharedValue<number>` — 0 when keyboard is hidden, the actual keyboard height (in points, safe area already included) while visible. It updates on the UI thread with the same interpolation the native keyboard uses, so the layout moves in sync.
+
+### Full properties
+
+```tsx
+const keyboard = useAnimatedKeyboard()
+
+keyboard.height     // SharedValue<number> — current keyboard height
+keyboard.state      // SharedValue<KeyboardState> — CLOSED | CLOSING | OPEN | OPENING
+```
+
+`KeyboardState` values:
+| Value | Meaning |
+|-------|---------|
+| `KeyboardState.CLOSED` | Hidden and settled |
+| `KeyboardState.CLOSING` | Keyboard is dismissing |
+| `KeyboardState.OPEN` | Visible and settled |
+| `KeyboardState.OPENING` | Keyboard is rising |
+
+### Scroll-to-bottom chat list (messages above input)
+
+```tsx
+function ChatScreen() {
+  const keyboard = useAnimatedKeyboard()
+
+  // Pad the bottom of the scroll view so messages aren't behind the keyboard
+  const scrollPadStyle = useAnimatedStyle(() => ({
+    height: keyboard.height.value,
+  }))
+
+  return (
+    <View style={{ flex: 1 }}>
+      <ScrollView
+        ref={scrollRef}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"  // drag-to-dismiss follows finger
+      >
+        {messages.map(m => <MessageBubble key={m.id} message={m} />)}
+        <Animated.View style={scrollPadStyle} />  {/* spacer that grows with keyboard */}
+      </ScrollView>
+      <ChatInput />
+    </View>
+  )
+}
+```
+
+**`keyboardDismissMode="interactive"`** — the scroll view dismisses the keyboard as you drag down, mirroring native Messages/WhatsApp UX. Only available on iOS; on Android it falls back to `"on-drag"`.
+
+### Fade the send button in when keyboard is open
+
+```tsx
+import { useDerivedValue, useAnimatedStyle, withTiming, KeyboardState } from 'react-native-reanimated'
+
+const sendOpacity = useDerivedValue(() =>
+  withTiming(keyboard.state.value === KeyboardState.OPEN ? 1 : 0, { duration: 150 })
+)
+
+const sendButtonStyle = useAnimatedStyle(() => ({
+  opacity: sendOpacity.value,
+  pointerEvents: sendOpacity.value > 0 ? 'auto' : 'none',
+}))
+```
+
+### `useAnimatedKeyboard` vs `KeyboardAvoidingView`
+
+| | `KeyboardAvoidingView` | `useAnimatedKeyboard` |
+|---|---|---|
+| Animation | Jumps / guesses offset | Tracks keyboard frame on UI thread |
+| Interactivity | No drag-to-dismiss sync | Works with `keyboardDismissMode="interactive"` |
+| Safe area | Manual adjustment needed | Height includes safe area already |
+| Use when | Simple single-input forms | Chat, comments, any continuous keyboard interaction |
+
+**Setup note**: `useAnimatedKeyboard` requires `react-native-reanimated` ≥ 3.1. On Android, add `android:windowSoftInputMode="adjustResize"` to the Activity in `AndroidManifest.xml` — without it the keyboard will not report its height correctly.
+
+```xml
+<!-- android/app/src/main/AndroidManifest.xml -->
+<activity android:windowSoftInputMode="adjustResize" ... />
+```
+
+In Expo managed workflow, set this via `app.json`:
+```json
+{
+  "expo": {
+    "android": {
+      "softwareKeyboardLayoutMode": "resize"
+    }
+  }
+}
+```
 
 ---
 
