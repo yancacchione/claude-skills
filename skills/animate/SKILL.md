@@ -4021,6 +4021,7 @@ Rules:
 | List gradient fade | `expo-linear-gradient` LinearGradient overlay | 72px height, `pointerEvents="none"`, bg-color match required |
 | Card swipe stack | Reanimated + RNGH Pan — rotate+translate, threshold or velocity fling | 35% width threshold, 800px/s velocity; snap back with `withSpring(0, {damping:22})` |
 | Drag-to-reorder row | LongPress (400ms) + Pan `Gesture.Simultaneous`, shift others with `withSpring` | `ITEM_HEIGHT` must be fixed; haptic on lift + drop; guard `onUpdate` with `isDragging` |
+| Drum-roll / wheel picker | Reanimated `useAnimatedScrollHandler` + `interpolate` on `ScrollView` with `snapToInterval` | `ITEM_HEIGHT: 44`, `decelerationRate: "fast"`, `Haptics.selectionAsync()` on `onMomentumEnd` |
 
 **IntersectionObserver sticky header — appears once user scrolls past a section:**
 
@@ -11151,6 +11152,194 @@ function SplashLogo() {
 | `SplashScreen.hideAsync()` called twice (Strict Mode) | Wrap in a ref guard: `if (hidden.current) return; hidden.current = true; await hideAsync()` |
 
 **Timing rule**: hide the native splash as soon as minimum assets are loaded. Don't wait for all network data — the custom animated overlay buys you the extra 600ms cover without the user noticing.
+
+---
+
+## Drum-Roll / Wheel Picker (Reanimated 3)
+
+The iOS-style scrollable column picker — time pickers, duration selectors, number dials. Uses a `ScrollView` with `snapToInterval`, `useScrollViewOffset` for position tracking, and `interpolate` to scale/fade non-selected items. Haptics on each selection change.
+
+### Core pattern
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedStyle, interpolate, Extrapolation,
+  useAnimatedScrollHandler, useAnimatedRef,
+} from 'react-native-reanimated'
+import { ScrollView, View, Text, StyleSheet } from 'react-native'
+import * as Haptics from 'expo-haptics'
+import { useCallback, useRef } from 'react'
+
+const ITEM_HEIGHT = 44
+const VISIBLE_ITEMS = 5                        // must be odd — the center slot is selected
+const PICKER_HEIGHT = ITEM_HEIGHT * VISIBLE_ITEMS
+
+interface WheelPickerProps {
+  items: string[]
+  selectedIndex: number
+  onSelect: (index: number) => void
+}
+
+export function WheelPicker({ items, selectedIndex, onSelect }: WheelPickerProps) {
+  const scrollRef = useAnimatedRef<Animated.ScrollView>()
+  const scrollY = useSharedValue(selectedIndex * ITEM_HEIGHT)
+  const lastIndex = useRef(selectedIndex)
+
+  const scrollHandler = useAnimatedScrollHandler({
+    onScroll: (e) => {
+      scrollY.value = e.contentOffset.y
+    },
+    onMomentumEnd: (e) => {
+      // Snap index is determined by scroll position, not by gesture end
+      const index = Math.round(e.contentOffset.y / ITEM_HEIGHT)
+      if (index !== lastIndex.current) {
+        lastIndex.current = index
+        runOnJS(onSelect)(Math.max(0, Math.min(index, items.length - 1)))
+        runOnJS(Haptics.selectionAsync)()
+      }
+    },
+  })
+
+  return (
+    <View style={styles.container}>
+      {/* Selection highlight — sits behind the scrolling items */}
+      <View style={styles.selectionMask} pointerEvents="none" />
+
+      <Animated.ScrollView
+        ref={scrollRef}
+        onScroll={scrollHandler}
+        scrollEventThrottle={16}
+        snapToInterval={ITEM_HEIGHT}
+        decelerationRate="fast"             // iOS fast decel = snappy picker feel
+        showsVerticalScrollIndicator={false}
+        // Pad top+bottom so the first and last items can reach center
+        contentContainerStyle={{ paddingVertical: ITEM_HEIGHT * Math.floor(VISIBLE_ITEMS / 2) }}
+        contentOffset={{ x: 0, y: selectedIndex * ITEM_HEIGHT }}
+      >
+        {items.map((label, i) => (
+          <PickerItem
+            key={label}
+            label={label}
+            index={i}
+            scrollY={scrollY}
+          />
+        ))}
+      </Animated.ScrollView>
+    </View>
+  )
+}
+
+function PickerItem({
+  label, index, scrollY,
+}: { label: string; index: number; scrollY: Animated.SharedValue<number> }) {
+  const style = useAnimatedStyle(() => {
+    // Distance of this item from the center slot, in items
+    const offset = (scrollY.value / ITEM_HEIGHT) - index
+    const absOffset = Math.abs(offset)
+
+    const scale   = interpolate(absOffset, [0, 1, 2], [1, 0.88, 0.76], Extrapolation.CLAMP)
+    const opacity = interpolate(absOffset, [0, 1, 2], [1, 0.55, 0.25], Extrapolation.CLAMP)
+
+    return { transform: [{ scale }], opacity }
+  })
+
+  return (
+    <Animated.View style={[styles.item, style]}>
+      <Text style={styles.label}>{label}</Text>
+    </Animated.View>
+  )
+}
+
+const styles = StyleSheet.create({
+  container: {
+    height: PICKER_HEIGHT,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  selectionMask: {
+    position: 'absolute',
+    top: ITEM_HEIGHT * Math.floor(VISIBLE_ITEMS / 2),
+    left: 0,
+    right: 0,
+    height: ITEM_HEIGHT,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.15)',
+  },
+  item: {
+    height: ITEM_HEIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  label: {
+    fontFamily: 'JetBrainsMono-Variable',
+    fontSize: 20,
+    color: '#fff',
+  },
+})
+```
+
+### Two-column time picker (hours + minutes)
+
+```tsx
+// Generate arrays of display strings
+const HOURS   = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'))
+const MINUTES = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0'))
+
+function TimePicker({ value, onChange }: {
+  value: { hour: number; minute: number }
+  onChange: (v: { hour: number; minute: number }) => void
+}) {
+  return (
+    <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+      <WheelPicker
+        items={HOURS}
+        selectedIndex={value.hour - 1}
+        onSelect={(i) => onChange({ ...value, hour: i + 1 })}
+      />
+      <Text style={{ color: '#fff', fontSize: 24, fontFamily: 'JetBrainsMono-Variable' }}>:</Text>
+      <WheelPicker
+        items={MINUTES}
+        selectedIndex={value.minute}
+        onSelect={(i) => onChange({ ...value, minute: i })}
+      />
+    </View>
+  )
+}
+```
+
+### Programmatic scroll (setting value from outside)
+
+```tsx
+// Scroll to an index without user interaction — e.g. "set to current time"
+import { scrollTo } from 'react-native-reanimated'
+
+function scrollToIndex(ref: AnimatedRef<Animated.ScrollView>, index: number, animated = true) {
+  scrollTo(ref, 0, index * ITEM_HEIGHT, animated)
+}
+
+// Call from a useEffect when default value changes:
+useEffect(() => {
+  scrollToIndex(scrollRef, selectedIndex, false) // false = no animation on initial set
+}, [])
+```
+
+### Gotchas
+
+| Issue | Fix |
+|---|---|
+| Picker doesn't snap cleanly | Confirm `snapToInterval={ITEM_HEIGHT}` and `decelerationRate="fast"` are both set |
+| First/last item can't reach center | Add `paddingVertical` of `ITEM_HEIGHT * floor(VISIBLE_ITEMS / 2)` to `contentContainerStyle` |
+| Haptic fires on mount (index 0) | Guard with `if (index !== lastIndex.current)` before calling `selectionAsync` |
+| `scrollTo` worklet not available | Import from `react-native-reanimated`, not from RN — `scrollTo` is a Reanimated worklet |
+| Android: no momentum snap | Set `snapToInterval` + `snapToAlignment="center"` — Android needs both |
+
+### Aesthetic tuning
+
+- **`VISIBLE_ITEMS: 5`** is standard. 3 is tighter (better for modals). 7 is better for long lists.
+- **Scale range `[1, 0.88, 0.76]`** — the drop-off makes unselected items recede. Flatten to `[1, 0.94, 0.88]` for a subtler effect.
+- **JetBrains Mono variable font** — weight-animate the selected item by deriving `fontVariationSettings` from `scrollY` offset; center item gets `'wght' 700`, off-center items get `'wght' 400`. Requires `@expo-google-fonts/jetbrains-mono` or the variable `.ttf` loaded via `useFonts`.
+- **Haptics**: `selectionAsync()` is the right type here (not `impactAsync`) — it maps to UISelectionFeedbackGenerator on iOS, which is the same feedback the system picker uses.
 
 ---
 
