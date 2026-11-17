@@ -11155,16 +11155,106 @@ function SplashLogo() {
 
 ---
 
+## Native Time Picker (`@react-native-community/datetimepicker`)
+
+For **settings and preferences screens** (notification time, reminder hour, schedule), use the platform's native picker — zero Reanimated, full OS integration.
+
+```bash
+npx expo install @react-native-community/datetimepicker
+```
+
+### iOS — `display="compact"` (inline row picker)
+
+```tsx
+import DateTimePicker from '@react-native-community/datetimepicker'
+import { Platform, View, Text, TouchableOpacity, StyleSheet } from 'react-native'
+import { useState } from 'react'
+
+function defaultReminderTime() {
+  const d = new Date()
+  d.setHours(8, 0, 0, 0)
+  return d
+}
+
+export function ReminderTimeSetting() {
+  const [time, setTime] = useState(defaultReminderTime)
+  const [showAndroidPicker, setShowAndroidPicker] = useState(false)
+
+  return (
+    <View style={s.row}>
+      <Text style={s.label}>Reminder time</Text>
+
+      {/* iOS: compact inline spinner — renders inside the row, no modal */}
+      {Platform.OS === 'ios' && (
+        <DateTimePicker
+          value={time}
+          mode="time"
+          display="compact"
+          accentColor="#292A26"
+          onChange={(_event, selectedDate) => {
+            if (selectedDate) setTime(selectedDate)
+          }}
+        />
+      )}
+
+      {/* Android: show current value; tap opens the system modal */}
+      {Platform.OS !== 'ios' && (
+        <TouchableOpacity activeOpacity={0.6} onPress={() => setShowAndroidPicker(true)}>
+          <Text style={s.value}>
+            {time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      {showAndroidPicker && (
+        <DateTimePicker
+          value={time}
+          mode="time"
+          onChange={(event, selectedDate) => {
+            setShowAndroidPicker(false)
+            if (event.type === 'set' && selectedDate) setTime(selectedDate)
+          }}
+        />
+      )}
+    </View>
+  )
+}
+```
+
+**`display` values for `mode="time"`:**
+
+| `display` | iOS | Android | Use |
+|-----------|-----|---------|-----|
+| `"compact"` | Inline tap-to-expand time control | — | Settings rows |
+| `"spinner"` | Full drum-roll columns | Full drum-roll | Custom UI sheets |
+| `"clock"` | — | Analog clock face | Form-like pickers |
+| `"default"` | Same as `"compact"` | Same as `"clock"` | Avoid — unpredictable per OS version |
+
+**Key rules:**
+- `event.type === 'set'` guards against Android "dismiss" — without this check, dismissing without selecting clears the value.
+- iOS `onChange` fires on every wheel movement (not just confirm) — always null-check `selectedDate`.
+- `accentColor` tints the iOS compact control and spinner highlight color.
+- **Never** wrap the iOS `DateTimePicker` in a `TouchableOpacity` — it handles its own tap to expand.
+- For Android: the picker is a system modal dialog, not an inline element. Show it imperatively on press and hide it in `onChange`.
+
+**When to use native DateTimePicker vs custom wheel picker:**
+- **Native** (`@react-native-community/datetimepicker`): settings rows, notification preferences, time inputs in forms — integrates with OS accessibility, keyboard, and locale formatting for free.
+- **Custom Reanimated wheel** (see below): fullscreen pickers with custom styling where native OS chrome doesn't fit the design, or when you need to match the app's visual language exactly.
+
+---
+
 ## Drum-Roll / Wheel Picker (Reanimated 3)
 
 The iOS-style scrollable column picker — time pickers, duration selectors, number dials. Uses a `ScrollView` with `snapToInterval`, `useScrollViewOffset` for position tracking, and `interpolate` to scale/fade non-selected items. Haptics on each selection change.
+
+**Use this when you need full visual control** — custom font, custom colors, no OS chrome, deeply integrated into the screen design. For settings screens, prefer native `DateTimePicker` above.
 
 ### Core pattern
 
 ```tsx
 import Animated, {
   useSharedValue, useAnimatedStyle, interpolate, Extrapolation,
-  useAnimatedScrollHandler, useAnimatedRef,
+  useAnimatedScrollHandler, useAnimatedRef, runOnJS,
 } from 'react-native-reanimated'
 import { ScrollView, View, Text, StyleSheet } from 'react-native'
 import * as Haptics from 'expo-haptics'
