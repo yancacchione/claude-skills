@@ -7248,6 +7248,79 @@ Fallback for older Reanimated: use `layoutId` from Framer Motion on web, or a ma
 | Tab change animation | Custom `tabBarButton` + `withSpring` on press |
 | Cleanup infinite animations | `cancelAnimation` in `useEffect` return |
 
+### Modal routes — `presentation` & `router.dismiss()`
+
+Expo Router treats screens in a `(modal)` group — or any screen with `presentation` set in its options — as modals. The option controls both the native sheet style and the dismiss gesture.
+
+```tsx
+// app/(modal)/_layout.tsx
+import { Stack } from 'expo-router'
+
+export default function ModalLayout() {
+  return (
+    <Stack screenOptions={{ headerShown: false }}>
+      {/* iOS detached sheet — reveals parent underneath */}
+      <Stack.Screen
+        name="question-detail"
+        options={{ presentation: 'formSheet' }}
+      />
+      {/* Edge-to-edge modal — slides from bottom, covers everything */}
+      <Stack.Screen
+        name="new-question"
+        options={{ presentation: 'fullScreenModal' }}
+      />
+    </Stack>
+  )
+}
+```
+
+`presentation` values: `'card'` (default push), `'modal'` (iOS sheet on iOS 16+), `'formSheet'` (detached sheet, parent visible), `'fullScreenModal'` (edge-to-edge), `'transparentModal'` (parent fully visible — use for bottom sheets / overlays).
+
+**Programmatic dismiss** — use `router.dismiss()` inside a modal; `router.back()` works but skips the native sheet dismiss animation:
+
+```tsx
+import { useRouter } from 'expo-router'
+
+export function CloseButton() {
+  const router = useRouter()
+  return (
+    <Pressable onPress={() => router.dismiss()}>
+      <Text>Done</Text>
+    </Pressable>
+  )
+}
+
+// Dismiss N levels (useful for stacked sheets)
+router.dismiss(2)
+
+// Dismiss everything back to the modal stack root
+router.dismissAll()
+```
+
+**Animate content *inside* a formSheet** — the sheet itself animates natively; animate the content separately for a layered feel:
+
+```tsx
+import Animated, { FadeInUp } from 'react-native-reanimated'
+
+export default function QuestionDetail() {
+  return (
+    // Sheet slides up → content fades + rises inside it
+    <Animated.View entering={FadeInUp.duration(280).springify()}>
+      {/* question content */}
+    </Animated.View>
+  )
+}
+```
+
+| Use case | `presentation` |
+|----------|---------------|
+| Detail card, peek at parent | `'formSheet'` |
+| Full-screen create / edit flow | `'fullScreenModal'` |
+| Bottom sheet overlay | `'transparentModal'` + custom `<BottomSheet>` |
+| Standard iOS modal (swipe-down dismiss) | `'modal'` |
+
+> **Gotcha:** `formSheet` with `headerShown: false` leaves users no visible dismiss affordance — the swipe gesture works but isn't discoverable. Either keep the header or add an explicit close button.
+
 ### Custom animated tab bar (`tabBar` prop)
 
 Expo Router's built-in `<Tabs>` doesn't support animating the active indicator or individual tab press feedback. For either, pass a custom component via the `tabBar` prop — it replaces the entire tab bar.
