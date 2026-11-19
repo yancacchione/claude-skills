@@ -11506,6 +11506,89 @@ useEffect(() => {
 
 ---
 
+## Animated Skeleton Loader (Expo / React Native)
+
+A `LinearGradient` that sweeps across shaped placeholders. Use in place of spinners while content loads — more informative, less intrusive. Driven entirely by Reanimated 3 on the UI thread; zero JS renders per frame.
+
+```tsx
+import { useEffect } from 'react'
+import { View, StyleSheet, useWindowDimensions } from 'react-native'
+import Animated, {
+  useSharedValue, useAnimatedStyle,
+  withRepeat, withTiming, Easing, cancelAnimation,
+} from 'react-native-reanimated'
+import { LinearGradient } from 'expo-linear-gradient'
+
+const SHIMMER_DURATION = 1100  // ms per sweep — faster feels more energetic
+
+function ShimmerOverlay() {
+  const { width } = useWindowDimensions()
+  const translateX = useSharedValue(-width)
+
+  useEffect(() => {
+    translateX.value = withRepeat(
+      withTiming(width, { duration: SHIMMER_DURATION, easing: Easing.linear }),
+      -1,
+      false,  // always LTR, no reverse
+    )
+    return () => cancelAnimation(translateX)
+  }, [width])
+
+  const style = useAnimatedStyle(() => ({
+    transform: [{ translateX: translateX.value }],
+  }))
+
+  return (
+    <Animated.View style={[StyleSheet.absoluteFill, style]}>
+      <LinearGradient
+        colors={['transparent', 'rgba(255,255,255,0.08)', 'transparent']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0 }}
+        style={{ flex: 1 }}
+      />
+    </Animated.View>
+  )
+}
+
+// A single skeleton "bone" — wrap in overflow:hidden to clip the shimmer
+function SkeletonBone({ width, height, borderRadius = 6, style }: {
+  width: number | string
+  height: number
+  borderRadius?: number
+  style?: object
+}) {
+  return (
+    <View style={[{ width, height, borderRadius, backgroundColor: '#1e1e1e', overflow: 'hidden' }, style]}>
+      <ShimmerOverlay />
+    </View>
+  )
+}
+
+// Compose into a card skeleton that matches your real layout
+function QuoteCardSkeleton() {
+  return (
+    <View style={{ gap: 10, padding: 16 }}>
+      <SkeletonBone width="60%" height={14} />
+      <SkeletonBone width="100%" height={14} />
+      <SkeletonBone width="80%" height={14} />
+      <SkeletonBone width={48} height={48} borderRadius={24} style={{ marginTop: 8 }} />
+    </View>
+  )
+}
+```
+
+**Dark-mode color**: `'#1e1e1e'` for the bone background and `rgba(255,255,255,0.08)` for the shimmer highlight work for Yan's phosphor/terminal aesthetic. For a lighter theme swap to `'#e8e8e8'` bone and `rgba(255,255,255,0.6)` shimmer.
+
+**Performance rules:**
+- One `ShimmerOverlay` per screen, not per bone — if all bones share the same phase, use a single `useSharedValue` at the parent level and pass the animated style down via context or a prop.
+- `cancelAnimation` in the `useEffect` cleanup prevents the "cannot update unmounted component" warning on fast navigation.
+- `LinearGradient` from `expo-linear-gradient` is GPU-composited; the shimmer runs at 60fps without JS involvement.
+- Use `overflow: 'hidden'` on each bone, not on the shimmer itself — clipping at the bone keeps compositing efficient.
+
+**List usage**: render `<QuoteCardSkeleton />` as the `ListEmptyComponent` while your Supabase query is in-flight, then swap to the real list when data arrives. Use `AnimatePresence` or `entering={FadeIn}` on the real list so the swap isn't a snap.
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
