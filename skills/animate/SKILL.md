@@ -11589,6 +11589,149 @@ function QuoteCardSkeleton() {
 
 ---
 
+## `react-native-keyboard-controller` — Jitter-Free Keyboard UI (Expo / React Native)
+
+The standard `KeyboardAvoidingView` guesses offset; `useAnimatedKeyboard` from Reanimated tracks the frame but still runs through the bridge. `react-native-keyboard-controller` by Kiryl Ziusko solves both: it drives keyboard UI through Reanimated shared values that update synchronously on the UI thread, and provides `KeyboardStickyView` — a view that is **natively mounted to the keyboard frame**, so an input bar never lags or jumps.
+
+```bash
+npx expo install react-native-keyboard-controller
+```
+
+### Setup — `KeyboardProvider`
+
+Wrap your root (or the screen root) once:
+
+```tsx
+// app/_layout.tsx
+import { KeyboardProvider } from 'react-native-keyboard-controller'
+
+export default function RootLayout() {
+  return (
+    <KeyboardProvider>
+      <Stack />
+    </KeyboardProvider>
+  )
+}
+```
+
+### `KeyboardStickyView` — the killer feature
+
+Mounts a view whose bottom edge tracks the keyboard's top edge during the animation — in native, with no JS interpolation. The input bar in a chat screen moves in perfect sync, with zero lag.
+
+```tsx
+import { KeyboardStickyView } from 'react-native-keyboard-controller'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
+
+function ChatScreen() {
+  const { bottom } = useSafeAreaInsets()
+
+  return (
+    <View style={{ flex: 1 }}>
+      <MessageList />
+
+      {/* Sticks directly to the top of the keyboard — no layout math needed */}
+      <KeyboardStickyView offset={{ closed: bottom, opened: 0 }}>
+        <ReplyBar />
+      </KeyboardStickyView>
+    </View>
+  )
+}
+```
+
+`offset`:
+- `closed` — extra bottom offset when keyboard is hidden (safe area inset)
+- `opened` — extra bottom offset when keyboard is visible (usually 0)
+
+The `offset` accepts both static numbers and Reanimated shared values for dynamic adjustments.
+
+### `useKeyboardHandler` — synchronous keyboard frame values
+
+Gives you the keyboard height **on the UI thread** at every frame of the animation — the same precision as `useAnimatedKeyboard`, but via worklet callbacks. Useful for custom keyboard-driven animations beyond what `KeyboardStickyView` handles.
+
+```tsx
+import { useKeyboardHandler } from 'react-native-keyboard-controller'
+import { useSharedValue, useAnimatedStyle, interpolate } from 'react-native-reanimated'
+
+function useSyncKeyboardHeight() {
+  const height = useSharedValue(0)
+
+  useKeyboardHandler(
+    {
+      onMove: (e) => {
+        'worklet'
+        height.value = e.height  // tracks every frame of the keyboard animation
+      },
+      onEnd: (e) => {
+        'worklet'
+        height.value = e.height  // settles at final keyboard height
+      },
+    },
+    [],
+  )
+
+  return height
+}
+
+// Usage — fade a CTA button out as keyboard rises
+function CommentScreen() {
+  const keyboardHeight = useSyncKeyboardHeight()
+
+  const ctaStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(keyboardHeight.value, [0, 200], [1, 0], 'clamp'),
+    transform: [{ translateY: interpolate(keyboardHeight.value, [0, 200], [0, 20], 'clamp') }],
+  }))
+
+  return (
+    <View style={{ flex: 1 }}>
+      {/* ... content ... */}
+      <Animated.View style={ctaStyle}>
+        <SubmitButton />
+      </Animated.View>
+      <KeyboardStickyView offset={{ closed: 0, opened: 0 }}>
+        <CommentInput />
+      </KeyboardStickyView>
+    </View>
+  )
+}
+```
+
+`e` in the handler: `{ height: number, duration: number, timestamp: number, target: number, type: 'shown' | 'hidden' }`.
+
+### `KeyboardAwareScrollView` — no-config keyboard scroll adjustment
+
+Replaces `KeyboardAvoidingView` for scroll containers. Automatically scrolls the focused input into view when the keyboard opens. No `behavior` prop to guess, no `keyboardVerticalOffset` to tune.
+
+```tsx
+import { KeyboardAwareScrollView } from 'react-native-keyboard-controller'
+
+function ProfileForm() {
+  return (
+    <KeyboardAwareScrollView
+      bottomOffset={16}       // extra gap between focused input and keyboard top
+      disableScrollOnKeyboardHide  // don't scroll back when keyboard closes
+    >
+      <TextInput placeholder="Name" style={styles.input} />
+      <TextInput placeholder="Bio" multiline style={styles.input} />
+      <TextInput placeholder="Website" style={styles.input} />
+    </KeyboardAwareScrollView>
+  )
+}
+```
+
+### Decision: `react-native-keyboard-controller` vs `useAnimatedKeyboard`
+
+| Situation | Use |
+|-----------|-----|
+| Input bar must track keyboard with zero jitter (chat, comment) | `KeyboardStickyView` from `keyboard-controller` |
+| Scroll view with multiple inputs (forms, settings) | `KeyboardAwareScrollView` |
+| Custom animation driven by keyboard frame (fade, slide non-input elements) | `useKeyboardHandler` from `keyboard-controller` |
+| Simple one-screen adjust, no extra install | `useAnimatedKeyboard` from Reanimated |
+| Legacy `KeyboardAvoidingView` already in place | Migrate to `KeyboardAwareScrollView` — same intent, more reliable |
+
+**iOS vs Android**: `keyboard-controller` normalizes both platforms — the `height` from `useKeyboardHandler` is the actual keyboard frame height on both OS, eliminating the iOS `behavior="padding"` / Android `behavior="height"` guess.
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
