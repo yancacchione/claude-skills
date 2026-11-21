@@ -11732,6 +11732,127 @@ function ProfileForm() {
 
 ---
 
+## `SharedTransition` — Hero Animations Between Screens (Reanimated 3 + Expo Router)
+
+`SharedTransition` morphs a view from its position on screen A to its position on screen B during navigation — the iOS "hero" effect in pure JS. Source and destination views share a `sharedTransitionTag`; Reanimated captures both layouts and interpolates between them.
+
+> **Stack requirement**: `SharedTransition` works reliably only with the **JS stack navigator** (`@react-navigation/stack`). The native stack (`react-native-screens`, the Expo Router v4 default) does not support layout-capture across screens. See the [Expo Router Screen Transitions](#expo-router-screen-transitions) section for how to swap to the JS stack.
+
+```bash
+npx expo install react-native-reanimated  # 3.6+ required
+npm install @react-navigation/stack       # JS stack needed
+```
+
+### Basic usage — card → detail
+
+Give the **same tag** to the transitioning view in both screens. Reanimated does the rest.
+
+```tsx
+// app/(stack)/feed.tsx — list screen
+import Animated from 'react-native-reanimated'
+import { router } from 'expo-router'
+
+function QuoteCard({ item }: { item: Quote }) {
+  return (
+    <Pressable onPress={() => router.push(`/detail/${item.id}`)}>
+      {/* Tag must be unique per item — include the id */}
+      <Animated.View sharedTransitionTag={`card-${item.id}`} style={styles.card}>
+        <Animated.Image
+          source={{ uri: item.coverUrl }}
+          sharedTransitionTag={`cover-${item.id}`}
+          style={styles.cardImage}
+        />
+        <Text style={styles.title}>{item.title}</Text>
+      </Animated.View>
+    </Pressable>
+  )
+}
+
+// app/(stack)/detail/[id].tsx — detail screen
+import Animated from 'react-native-reanimated'
+import { useLocalSearchParams } from 'expo-router'
+
+export default function DetailScreen() {
+  const { id } = useLocalSearchParams<{ id: string }>()
+
+  return (
+    <View style={{ flex: 1 }}>
+      {/* Same tags — Reanimated morphs from list position to here */}
+      <Animated.View sharedTransitionTag={`card-${id}`} style={styles.hero}>
+        <Animated.Image
+          source={{ uri: quote.coverUrl }}
+          sharedTransitionTag={`cover-${id}`}
+          style={styles.heroImage}
+        />
+      </Animated.View>
+      {/* Rest of detail content — does NOT need a tag */}
+      <ScrollView>
+        <Text>{quote.body}</Text>
+      </ScrollView>
+    </View>
+  )
+}
+```
+
+### Custom transition — spring physics
+
+The default cross-fade with size/position interpolation is linear. Override it with `SharedTransition.custom()` to use spring:
+
+```tsx
+import { SharedTransition, withSpring } from 'react-native-reanimated'
+
+// Define once — reuse across screens
+export const springTransition = SharedTransition.custom((values) => {
+  'worklet'
+  return {
+    originX: withSpring(values.targetOriginX, { damping: 22, stiffness: 200 }),
+    originY: withSpring(values.targetOriginY, { damping: 22, stiffness: 200 }),
+    width:   withSpring(values.targetWidth,   { damping: 22, stiffness: 200 }),
+    height:  withSpring(values.targetHeight,  { damping: 22, stiffness: 200 }),
+  }
+})
+
+// Apply via sharedTransitionStyle on both source and destination
+<Animated.View
+  sharedTransitionTag={`card-${item.id}`}
+  sharedTransitionStyle={springTransition}
+  style={styles.card}
+>
+```
+
+`values` in the worklet:
+
+| Key | Meaning |
+|-----|---------|
+| `currentOriginX` / `currentOriginY` | Current screen position (px) |
+| `targetOriginX` / `targetOriginY` | Destination position (px) |
+| `currentWidth` / `currentHeight` | Starting size |
+| `targetWidth` / `targetHeight` | Destination size |
+
+You can return any subset of `{ originX, originY, width, height }` — Reanimated defaults the rest.
+
+### Gotchas
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| No transition — element jumps instantly | Native stack active | Switch to JS stack (`@react-navigation/stack`) |
+| Element clips during transition | Clipping parent (`overflow: hidden`) | Ensure no clipped ancestor above the tagged view |
+| Wrong element animates in a list | Duplicate tags | Always include item ID in the tag string |
+| Child image morphs but container doesn't (or vice versa) | Tags are independent | Give separate tags to container and image if you want both to morph |
+| Back navigation doesn't animate | `goBack()` on native stack | Confirm you're on the JS stack; both push and pop are animated automatically |
+| Flash / white frame on transition start | Screen background renders before transition frame | Add `backgroundColor: 'transparent'` to the destination screen's container during capture |
+
+### When to use SharedTransition vs alternatives
+
+| Scenario | Use |
+|----------|-----|
+| Card → full-screen detail (image hero) | `SharedTransition` |
+| Modal sheet expanding from a button | `Animated.SplashScreen` fade + native `formSheet` modal |
+| Tab switch with active indicator | `layoutId` (Framer Motion / web), or `useSharedValue` + `useDerivedValue` tab indicator |
+| Conditional layout morph on same screen | Reanimated layout animations (`entering`/`exiting` presets) |
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
