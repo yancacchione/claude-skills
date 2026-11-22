@@ -11853,6 +11853,310 @@ You can return any subset of `{ originX, originY, width, height }` — Reanimate
 
 ---
 
+## iOS Adaptive Sheet Detents (Expo Router + React Navigation)
+
+`sheetAllowedDetents` controls which sizes an iOS sheet can snap to. Available in Expo Router (SDK 51+) via React Navigation 6.1 — pass as `Stack.Screen` options. Android ignores all `sheet*` props silently.
+
+### Setting detents
+
+```tsx
+// app/(modal)/_layout.tsx
+<Stack.Screen
+  name="filter-panel"
+  options={{
+    presentation: 'formSheet',
+    sheetAllowedDetents: [0.4, 1.0],       // 40% and full height
+    sheetInitialDetentIndex: 0,             // start at first detent (40%)
+    sheetGrabberVisible: true,              // iOS grabber pill at top
+    sheetExpandsWhenScrolledToEdge: true,   // scroll to top → expand to next detent
+    sheetCornerRadius: 20,                  // rounded corners (default: system radius)
+    sheetLargestUndimmedDetentIndex: 0,     // parent NOT dimmed at first detent; dimmed at full
+    headerShown: false,
+  }}
+/>
+```
+
+`sheetAllowedDetents` accepts:
+- An array of fractions `[0.4, 1.0]` — sheet can live at 40% or 100% height
+- `'fitToContents'` — sheet height matches its content (great for action sheets, pickers)
+- `'all'` — any drag position is a valid detent (least common; use arrays for snapping)
+
+| Option | Effect |
+|--------|--------|
+| `sheetAllowedDetents` | Snap positions (fractions 0–1, `'fitToContents'`, or `'all'`) |
+| `sheetInitialDetentIndex` | Which detent to open at (0-indexed into the array) |
+| `sheetGrabberVisible` | Show the grabber pill (default `false`) |
+| `sheetExpandsWhenScrolledToEdge` | Scroll at top → expand to next detent (default `true`) |
+| `sheetCornerRadius` | Corner radius; set to `-1` for system default |
+| `sheetLargestUndimmedDetentIndex` | Parent is undimmed at detents ≤ this index |
+
+### Common patterns
+
+**Contact/location picker — starts compact, expands on scroll:**
+```tsx
+options={{
+  presentation: 'formSheet',
+  sheetAllowedDetents: [0.5, 1.0],
+  sheetInitialDetentIndex: 0,
+  sheetExpandsWhenScrolledToEdge: true,
+  sheetGrabberVisible: true,
+  sheetLargestUndimmedDetentIndex: 0, // parent still interactive at half height
+}}
+```
+
+**Action sheet — fits content, no dimming:**
+```tsx
+options={{
+  presentation: 'formSheet',
+  sheetAllowedDetents: 'fitToContents',
+  sheetGrabberVisible: true,
+  sheetLargestUndimmedDetentIndex: 0, // never dims parent
+}}
+```
+
+**Full editor — always full screen, no detent handle:**
+```tsx
+options={{
+  presentation: 'formSheet',
+  sheetAllowedDetents: [1.0],
+  sheetGrabberVisible: false,
+  sheetInitialDetentIndex: 0,
+}}
+```
+
+### Animate content to detent changes
+
+React Navigation doesn't expose the current detent as a JS value. To animate content based on detent, use a scroll position proxy — `sheetExpandsWhenScrolledToEdge: true` means the sheet is at full height when the inner `ScrollView` is scrolled, so listen to scroll:
+
+```tsx
+import Animated, {
+  useAnimatedScrollHandler, useSharedValue, useAnimatedStyle, interpolate,
+} from 'react-native-reanimated'
+
+export default function FilterPanel() {
+  const scrollY = useSharedValue(0)
+
+  const onScroll = useAnimatedScrollHandler({ onScroll: (e) => {
+    scrollY.value = e.contentOffset.y
+  }})
+
+  // Fade in a "Show results" CTA only after user has scrolled (= interacted with full sheet)
+  const ctaStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(scrollY.value, [0, 40], [0, 1], 'clamp'),
+  }))
+
+  return (
+    <Animated.ScrollView onScroll={onScroll} scrollEventThrottle={16}>
+      {/* filter content */}
+      <Animated.View style={ctaStyle}>
+        <CTAButton />
+      </Animated.View>
+    </Animated.ScrollView>
+  )
+}
+```
+
+### Gotchas
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Props ignored on Android | Android doesn't support UISheetPresentationController | Wrap in Platform.OS === 'ios' checks for conditional behavior |
+| Sheet won't expand past first detent | `sheetExpandsWhenScrolledToEdge: false` | Set to `true` or remove (it's the default) |
+| `'fitToContents'` taller than screen | Content includes a ScrollView with flex:1 | Give the ScrollView a `maxHeight` |
+| Dimming unexpectedly strong | `sheetLargestUndimmedDetentIndex` unset | Set it to the index of your compact detent |
+| Sheet ignores `sheetAllowedDetents` array | Using SDK < 51 or React Navigation < 6.1 | Upgrade; older SDKs only support `'all'` |
+
+---
+
+## `AnimatedFlashList` — High-Performance Animated Lists (Expo / React Native)
+
+`@shopify/flash-list` is the drop-in `FlatList` replacement for 50+ item lists. It recycles cells like a UITableView, giving 10–60× better scroll performance. Wrapping it with `Animated.createAnimatedComponent` enables Reanimated 3 `entering`/`exiting` presets on each item and `useAnimatedStyle` on the list itself.
+
+### Setup
+
+```bash
+npx expo install @shopify/flash-list
+```
+
+```tsx
+import { FlashList } from '@shopify/flash-list'
+import Animated from 'react-native-reanimated'
+
+// Create once, outside the component — not inside render
+const AnimatedFlashList = Animated.createAnimatedComponent(FlashList)
+```
+
+> `Animated.createAnimatedComponent` must be called **outside** any component — calling it inside a render function creates a new type on every render, breaking reconciliation.
+
+### Basic animated list
+
+```tsx
+import { FadeInDown } from 'react-native-reanimated'
+
+function QuoteList({ quotes }: { quotes: Quote[] }) {
+  return (
+    <AnimatedFlashList
+      data={quotes}
+      estimatedItemSize={88}       // Required — without this FlashList can't virtualize correctly
+      keyExtractor={(item) => item.id}
+      renderItem={({ item, index }) => (
+        <Animated.View
+          entering={FadeInDown.delay(index * 30).duration(300).springify()}
+        >
+          <QuoteCard quote={item} />
+        </Animated.View>
+      )}
+    />
+  )
+}
+```
+
+### Stagger entry animations — cap the delay
+
+Staggering by `index * delay` looks great but becomes slow when the list is long. Cap the stagger at the visible item count so only the first screenful staggers:
+
+```tsx
+const STAGGER_LIMIT = 8  // only first 8 items stagger; rest appear instantly
+
+renderItem={({ item, index }) => (
+  <Animated.View
+    entering={
+      index < STAGGER_LIMIT
+        ? FadeInDown.delay(index * 40).duration(280)
+        : FadeInDown.duration(0)  // instant — avoids a 1-second delay on item #25
+    }
+  >
+    <QuoteCard quote={item} />
+  </Animated.View>
+)}
+```
+
+### Scroll-driven header animation
+
+`AnimatedFlashList` accepts `onScroll` — wire it to `useAnimatedScrollHandler` and animate a header based on scroll position:
+
+```tsx
+import Animated, {
+  useAnimatedScrollHandler, useSharedValue, useAnimatedStyle,
+  interpolate, Extrapolation,
+} from 'react-native-reanimated'
+
+const AnimatedFlashList = Animated.createAnimatedComponent(FlashList)
+
+function FeedWithCollapsingHeader({ items }: { items: Item[] }) {
+  const scrollY = useSharedValue(0)
+
+  const onScroll = useAnimatedScrollHandler({
+    onScroll: (e) => { scrollY.value = e.contentOffset.y },
+  })
+
+  const HEADER_H = 120
+  const headerStyle = useAnimatedStyle(() => ({
+    height: interpolate(scrollY.value, [0, HEADER_H], [HEADER_H, 0], Extrapolation.CLAMP),
+    opacity: interpolate(scrollY.value, [0, HEADER_H * 0.5], [1, 0], Extrapolation.CLAMP),
+  }))
+
+  return (
+    <View style={{ flex: 1 }}>
+      <Animated.View style={[styles.header, headerStyle]}>
+        <HeaderContent />
+      </Animated.View>
+
+      <AnimatedFlashList
+        data={items}
+        estimatedItemSize={72}
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        renderItem={({ item }) => <ItemRow item={item} />}
+        keyExtractor={(item) => item.id}
+      />
+    </View>
+  )
+}
+```
+
+### `useScrollViewOffset` with FlashList
+
+`useScrollViewOffset` requires a `ScrollView` ref. FlashList is not a `ScrollView` — use `useAnimatedScrollHandler` instead (as above). This is the most common migration gotcha when switching from `FlatList`.
+
+```tsx
+// ❌ Won't work with FlashList
+const ref = useAnimatedRef<FlashList<Item>>()
+const offset = useScrollViewOffset(ref)  // throws — FlashList is not a ScrollView
+
+// ✅ Use onScroll handler instead
+const scrollY = useSharedValue(0)
+const onScroll = useAnimatedScrollHandler({ onScroll: (e) => { scrollY.value = e.contentOffset.y } })
+<AnimatedFlashList onScroll={onScroll} scrollEventThrottle={16} ... />
+```
+
+### `renderItem` must be stable
+
+FlashList recycles cells aggressively. If `renderItem` is not memoized, re-renders inside the item cause FlashList to re-measure and re-lay out cells — negating the performance benefit:
+
+```tsx
+// ✅ Memoize renderItem
+const renderItem = useCallback(({ item }: { item: Quote }) => (
+  <Animated.View entering={FadeInDown.duration(300)}>
+    <QuoteCard quote={item} />
+  </Animated.View>
+), [])  // empty deps unless renderItem truly depends on changing state
+
+<AnimatedFlashList renderItem={renderItem} ... />
+```
+
+### `drawDistance` — tune off-screen rendering for entry animations
+
+By default FlashList renders cells slightly outside the visible area. If items animate `entering` from below, increase `drawDistance` so cells start their animation before they're visible:
+
+```tsx
+<AnimatedFlashList
+  drawDistance={200}   // render 200px ahead of the visible window (default: 250 on Android, 400 on iOS)
+  estimatedItemSize={88}
+  ...
+/>
+```
+
+Lower `drawDistance` = better memory; higher = less pop-in for animated entries. `250`–`400` is the sweet spot for most lists.
+
+### `exiting` animations — caveat
+
+`exiting` presets on items work, but FlashList recycles the cell before the exit animation completes unless you hold the cell with `useAnimatedStyle`. For delete animations, animate the item's `height` to 0 first, then remove it from `data`:
+
+```tsx
+// In the item component
+function QuoteItem({ quote, onDelete }: Props) {
+  const height = useSharedValue(ITEM_HEIGHT)
+
+  const handleDelete = () => {
+    height.value = withTiming(0, { duration: 220 }, (finished) => {
+      if (finished) runOnJS(onDelete)(quote.id)  // remove from data only after animation
+    })
+  }
+
+  const style = useAnimatedStyle(() => ({ height: height.value, overflow: 'hidden' }))
+
+  return (
+    <Animated.View style={style}>
+      <QuoteCard quote={quote} onDelete={handleDelete} />
+    </Animated.View>
+  )
+}
+```
+
+### Quick-reference
+
+| Property | Required | Notes |
+|----------|----------|-------|
+| `estimatedItemSize` | Yes | Average item height in px. Without it, FlashList logs a warning and performance degrades. |
+| `keyExtractor` | Yes | Must return a stable unique string — same as FlatList. |
+| `renderItem` | Yes | Wrap in `useCallback` to prevent cell recycling jank. |
+| `scrollEventThrottle` | Yes (for `onScroll`) | Set to `16` (60fps). |
+| `drawDistance` | No | Increase if entry animations pop in; decrease to save memory. |
+| `numColumns` | No | Works; `estimatedItemSize` = item height (not row height). |
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
