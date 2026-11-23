@@ -12157,6 +12157,317 @@ function QuoteItem({ quote, onDelete }: Props) {
 
 ---
 
+## Swipe-to-Dismiss Card (Reanimated 3 + Gesture Handler)
+
+Swipe a card completely off-screen — Tinder-style, notification-dismiss style. Unlike swipe-to-reveal (which snaps to a "revealed" position), here the card *leaves* the screen. Features: velocity-aware threshold, natural rotation, haptic on dismiss, stack hint card beneath.
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring, withTiming,
+  interpolate, Extrapolation, runOnJS,
+} from 'react-native-reanimated'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+import * as Haptics from 'expo-haptics'
+import { Dimensions, StyleSheet, View } from 'react-native'
+
+const { width: SCREEN_W } = Dimensions.get('window')
+const SWIPE_THRESHOLD = SCREEN_W * 0.35   // 35% of screen width to auto-dismiss
+const VELOCITY_THRESHOLD = 800            // px/s — fast swipe dismisses immediately
+
+interface SwipeCardProps {
+  children: React.ReactNode
+  onDismiss: (direction: 'left' | 'right') => void
+  style?: object
+}
+
+export function SwipeCard({ children, onDismiss, style }: SwipeCardProps) {
+  const translateX = useSharedValue(0)
+  const translateY = useSharedValue(0)
+  const startX     = useSharedValue(0)
+  const startY     = useSharedValue(0)
+
+  const dismiss = (direction: 'left' | 'right') => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium)
+    onDismiss(direction)
+  }
+
+  const pan = Gesture.Pan()
+    .onStart(() => {
+      startX.value = translateX.value
+      startY.value = translateY.value
+    })
+    .onUpdate((e) => {
+      translateX.value = startX.value + e.translationX
+      translateY.value = startY.value + e.translationY * 0.3  // resist vertical drag
+    })
+    .onEnd((e) => {
+      'worklet'
+      const absX    = Math.abs(translateX.value)
+      const fastX   = Math.abs(e.velocityX) > VELOCITY_THRESHOLD
+      const shouldDismiss = absX > SWIPE_THRESHOLD || fastX
+
+      if (shouldDismiss) {
+        const dir = translateX.value > 0 ? 1 : -1
+        const targetX = dir * (SCREEN_W * 1.4)
+        translateX.value = withTiming(targetX, { duration: 280 })
+        translateY.value = withTiming(translateY.value + e.velocityY * 0.1, { duration: 280 }, () => {
+          runOnJS(dismiss)(dir > 0 ? 'right' : 'left')
+        })
+      } else {
+        // Snap back
+        translateX.value = withSpring(0, { damping: 20, stiffness: 220 })
+        translateY.value = withSpring(0, { damping: 20, stiffness: 220 })
+      }
+    })
+
+  const cardStyle = useAnimatedStyle(() => {
+    // Rotate up to ±15° based on how far it's dragged
+    const rotate = interpolate(
+      translateX.value,
+      [-SCREEN_W * 0.5, 0, SCREEN_W * 0.5],
+      [-15, 0, 15],
+      Extrapolation.CLAMP,
+    )
+    // Fade out as card leaves the visible area
+    const opacity = interpolate(
+      Math.abs(translateX.value),
+      [0, SCREEN_W * 0.6],
+      [1, 0],
+      Extrapolation.CLAMP,
+    )
+    return {
+      transform: [
+        { translateX: translateX.value },
+        { translateY: translateY.value },
+        { rotate: `${rotate}deg` },
+      ],
+      opacity,
+    }
+  })
+
+  return (
+    <GestureDetector gesture={pan}>
+      <Animated.View style={[styles.card, style, cardStyle]}>
+        {children}
+      </Animated.View>
+    </GestureDetector>
+  )
+}
+
+const styles = StyleSheet.create({
+  card: {
+    borderRadius: 16,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+})
+```
+
+### Stack hint — card beneath the active card
+
+Show the next card peeking behind the active one — it scales up as the top card leaves:
+
+```tsx
+interface StackHintProps {
+  topCardX: SharedValue<number>  // the active card's translateX
+}
+
+function StackHint({ topCardX, children }: StackHintProps & { children: React.ReactNode }) {
+  const style = useAnimatedStyle(() => {
+    const dragProgress = Math.min(Math.abs(topCardX.value) / SCREEN_W, 1)
+    return {
+      transform: [{ scale: interpolate(dragProgress, [0, 1], [0.92, 1], Extrapolation.CLAMP) }],
+      opacity:   interpolate(dragProgress, [0, 0.5], [0.6, 1], Extrapolation.CLAMP),
+    }
+  })
+  return <Animated.View style={[StyleSheet.absoluteFill, style]}>{children}</Animated.View>
+}
+```
+
+### Swipe direction indicators (like/nope labels)
+
+```tsx
+function SwipeIndicators({ translateX }: { translateX: SharedValue<number> }) {
+  const likeStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(translateX.value, [0, 80], [0, 1], Extrapolation.CLAMP),
+    transform: [{ rotate: '-20deg' }],
+  }))
+  const nopeStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(translateX.value, [-80, 0], [1, 0], Extrapolation.CLAMP),
+    transform: [{ rotate: '20deg' }],
+  }))
+
+  return (
+    <>
+      <Animated.Text style={[styles.likeLabel, likeStyle]}>LIKE</Animated.Text>
+      <Animated.Text style={[styles.nopeLabel, nopeStyle]}>NOPE</Animated.Text>
+    </>
+  )
+}
+```
+
+### Gotchas
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Card snaps back after a fast swipe | Velocity not checked | Add `Math.abs(e.velocityX) > VELOCITY_THRESHOLD` condition |
+| Rotation feels wrong | Rotate origin defaults to center | Reanimated transforms rotate around the view's center — this is correct; don't add `transformOrigin` |
+| Vertical drag is too sensitive | `translationY` applied 1:1 | Multiply `translationY` by 0.2–0.4 to resist vertical movement |
+| `onDismiss` fires before animation ends | `runOnJS` called too early | Put `runOnJS(onDismiss)` inside the `withTiming` callback (`(finished) => { if (finished) ... }`) |
+| Card stays rendered after dismiss | `onDismiss` doesn't remove it | In the parent, filter the item from the data array in `onDismiss`; wrap the card in a conditional render |
+
+---
+
+## Animated Gradient Background (expo-linear-gradient + Reanimated 3)
+
+The gradient's `colors` array can be animated with `useAnimatedProps` and `interpolateColor`. This powers mood transitions, theme shifts, and time-of-day backgrounds without JS-thread bridging.
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedProps, withTiming, interpolateColor,
+  Easing,
+} from 'react-native-reanimated'
+import { LinearGradient } from 'expo-linear-gradient'
+import { StyleSheet } from 'react-native'
+
+// Must be created outside any component — same rule as AnimatedFlashList
+const AnimatedLinearGradient = Animated.createAnimatedComponent(LinearGradient)
+
+// Define gradient stops as tuples: [color at progress=0, color at progress=1]
+const GRADIENT_STOPS: [string, string][] = [
+  ['#1a1a2e', '#0f0f1a'],  // top stop
+  ['#16213e', '#0d1b2a'],  // mid stop
+  ['#0f3460', '#1a0a2e'],  // bottom stop
+]
+
+interface AnimatedGradientBgProps {
+  progress: Animated.SharedValue<number>  // 0 → palette A, 1 → palette B
+  start?: { x: number; y: number }
+  end?: { x: number; y: number }
+}
+
+export function AnimatedGradientBg({
+  progress,
+  start = { x: 0, y: 0 },
+  end   = { x: 1, y: 1 },
+}: AnimatedGradientBgProps) {
+  const animatedProps = useAnimatedProps(() => ({
+    colors: GRADIENT_STOPS.map(([from, to]) =>
+      interpolateColor(progress.value, [0, 1], [from, to])
+    ) as [string, string, string],
+  }))
+
+  return (
+    <AnimatedLinearGradient
+      animatedProps={animatedProps}
+      start={start}
+      end={end}
+      style={StyleSheet.absoluteFill}
+    />
+  )
+}
+```
+
+**Using it:**
+```tsx
+export default function HomeScreen() {
+  const gradientProgress = useSharedValue(0)
+
+  // Transition to "night" palette on a user action
+  const goNight = () => {
+    gradientProgress.value = withTiming(1, {
+      duration: 1200,
+      easing: Easing.inOut(Easing.cubic),
+    })
+  }
+
+  return (
+    <View style={{ flex: 1 }}>
+      <AnimatedGradientBg progress={gradientProgress} />
+      {/* rest of screen content */}
+    </View>
+  )
+}
+```
+
+### Looping ambient gradient (time-of-day background)
+
+```tsx
+import { useEffect } from 'react'
+import { withRepeat, withSequence } from 'react-native-reanimated'
+
+// Breathe between two palettes on a 6-second cycle
+const gradientProgress = useSharedValue(0)
+
+useEffect(() => {
+  gradientProgress.value = withRepeat(
+    withSequence(
+      withTiming(1, { duration: 6000, easing: Easing.inOut(Easing.sin) }),
+      withTiming(0, { duration: 6000, easing: Easing.inOut(Easing.sin) }),
+    ),
+    -1,  // infinite
+    false,
+  )
+}, [])
+```
+
+### More than two palette states — use `interpolateColor` with multi-stop input range
+
+```tsx
+// Three palette phases: dawn → noon → dusk
+const DAWN_TOP  = '#ff9a9e'
+const NOON_TOP  = '#a1c4fd'
+const DUSK_TOP  = '#f093fb'
+
+const animatedProps = useAnimatedProps(() => ({
+  colors: [
+    interpolateColor(progress.value, [0, 0.5, 1], [DAWN_TOP, NOON_TOP, DUSK_TOP]),
+    // ...more stops
+  ] as [string, string],
+}))
+```
+
+### Alternative: fade between two stacked LinearGradients
+
+When the two palettes share no color stops and `interpolateColor` produces muddy intermediates, stack two `LinearGradient` components and animate opacity instead:
+
+```tsx
+function CrossfadeGradient({ phase }: { phase: 'day' | 'night' }) {
+  const opacity = useSharedValue(phase === 'night' ? 1 : 0)
+
+  useEffect(() => {
+    opacity.value = withTiming(phase === 'night' ? 1 : 0, { duration: 1000 })
+  }, [phase])
+
+  const nightStyle = useAnimatedStyle(() => ({ opacity: opacity.value }))
+
+  return (
+    <View style={StyleSheet.absoluteFill}>
+      <LinearGradient colors={['#a1c4fd', '#c2e9fb']} style={StyleSheet.absoluteFill} />
+      <Animated.View style={[StyleSheet.absoluteFill, nightStyle]}>
+        <LinearGradient colors={['#1a1a2e', '#16213e']} style={StyleSheet.absoluteFill} />
+      </Animated.View>
+    </View>
+  )
+}
+```
+
+### Gotchas
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| TypeScript error on `colors` prop | `interpolateColor` returns `string \| number`, but `colors` expects `string[]` | Cast: `as [string, string, ...string[]]` |
+| Colors animate but gradient flickers | `AnimatedLinearGradient` created inside component | Move `Animated.createAnimatedComponent(LinearGradient)` outside component, to module scope |
+| Gradient direction doesn't animate | `start`/`end` can't be animated via `animatedProps` | These are static — only `colors` and `locations` are animatable |
+| Muddy mid-transition colors | `interpolateColor` travels through HSL, can produce unexpected hues | Switch to the crossfade-stack approach for high-contrast palette changes |
+| Background visible through content | Content renders over gradient | Ensure content is above the gradient in the z-order; use `zIndex` or render order in JSX |
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
