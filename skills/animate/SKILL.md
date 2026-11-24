@@ -12468,6 +12468,241 @@ function CrossfadeGradient({ phase }: { phase: 'day' | 'night' }) {
 
 ---
 
+## `expo-symbols` — SF Symbol Animations (iOS Native, Zero JS)
+
+`expo-symbols` exposes native SF Symbol rendering and animation to Expo apps. On iOS/tvOS the symbols are rendered natively by the OS — no JavaScript animation loop, no Reanimated, no bridge overhead. On Android and web it falls back to Material Symbols (animation spec is iOS-only).
+
+```bash
+npx expo install expo-symbols
+```
+
+```tsx
+import { SymbolView } from 'expo-symbols'
+
+// Basic — renders "heart.fill" at 28×28 in the tint color
+<SymbolView
+  name="heart.fill"
+  style={{ width: 28, height: 28 }}
+  tintColor="#ff6b6b"
+/>
+```
+
+### `animationSpec` — the animation prop
+
+```tsx
+import { SymbolView } from 'expo-symbols'
+
+// Bounce once on mount — OS-native spring, no JS
+<SymbolView
+  name="checkmark.circle.fill"
+  style={{ width: 32, height: 32 }}
+  tintColor="#4ade80"
+  animationSpec={{
+    effect: {
+      type: 'bounce',       // 'bounce' | 'pulse' | 'variableColor' | 'scale'
+    },
+    repeating: false,       // true = loops forever
+  }}
+/>
+
+// Pulse — breathing glow, great for "recording" or "listening" indicators
+<SymbolView
+  name="mic.fill"
+  style={{ width: 28, height: 28 }}
+  animationSpec={{
+    effect: { type: 'pulse' },
+    repeating: true,
+  }}
+/>
+
+// Variable color — sequentially illuminates the layers of multi-layer symbols
+// Best on symbols like "speaker.wave.3.fill", "wifi", "chart.bar.fill"
+<SymbolView
+  name="speaker.wave.3.fill"
+  style={{ width: 28, height: 28 }}
+  animationSpec={{
+    effect: { type: 'variableColor' },
+    repeating: true,
+    repeatCount: -1,          // -1 = infinite (iOS 17+)
+  }}
+/>
+```
+
+### Trigger animation on state change
+
+The `animationSpec` is re-applied when it changes — wrap in `useMemo` keyed to the trigger state so a new object reference fires a new animation:
+
+```tsx
+import { SymbolView } from 'expo-symbols'
+import { useMemo, useState } from 'react'
+
+function LikeButton() {
+  const [liked, setLiked] = useState(false)
+
+  const animSpec = useMemo(() => ({
+    effect: { type: liked ? 'bounce' : 'pulse' as const },
+    repeating: !liked,
+  }), [liked])
+
+  return (
+    <Pressable onPress={() => setLiked(v => !v)}>
+      <SymbolView
+        name={liked ? 'heart.fill' : 'heart'}
+        style={{ width: 28, height: 28 }}
+        tintColor={liked ? '#ff6b6b' : '#888'}
+        animationSpec={animSpec}
+      />
+    </Pressable>
+  )
+}
+```
+
+### Available effect types
+
+| Type | Feel | Good for |
+|------|------|---------|
+| `'bounce'` | Single spring pop | Confirmation, success, like |
+| `'pulse'` | Soft opacity pulse loop | "Live", recording, loading |
+| `'variableColor'` | Layer-by-layer fill sweep | Signal strength, bars, wifi |
+| `'scale'` | Scales up then back | Tap feedback, attention grab |
+
+### Rules
+
+- `animationSpec` is **iOS/tvOS only** — Android and web render the Material Symbol glyph statically. No crash on Android; just no animation.
+- Symbols render at whatever `style.width/height` you give them. `resizeMode` is `'scaleToFill'` by default — use explicit dimensions.
+- Use `name` values from the SF Symbols app (macOS, free from Apple) — over 5,000 symbols in iOS 17+.
+- Pair with `Pressable onPressIn` → `setAnimKey(k => k + 1)` and use `animKey` as a key on `SymbolView` to replay a one-shot animation imperatively.
+- Prefer `expo-symbols` over icon libraries for SF Symbol names — it renders the actual OS vector, not an SVG copy.
+
+---
+
+## Staggered Character / Word Entrance (Reanimated 3)
+
+Split text into an array and animate each piece with an `entering` preset + `.delay(i * stride)`. This is cleaner than a single `Animated.Text` timeout loop — each span runs entirely on the UI thread, respects `reduceMotion`, and is interruptible.
+
+### Per-word stagger (line of text)
+
+```tsx
+import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated'
+import { View, Text, StyleSheet } from 'react-native'
+
+interface StaggeredLineProps {
+  text: string
+  style?: object
+  stride?: number  // ms between each word — 40–80ms is the sweet spot
+}
+
+export function StaggeredLine({ text, style, stride = 50 }: StaggeredLineProps) {
+  const words = text.split(' ')
+
+  return (
+    <View style={styles.row}>
+      {words.map((word, i) => (
+        <Animated.Text
+          key={i}
+          entering={FadeInDown
+            .delay(i * stride)
+            .springify()
+            .damping(18)
+            .stiffness(220)
+            .reduceMotion(ReduceMotion.System)
+          }
+          style={[styles.word, style]}
+        >
+          {word}{i < words.length - 1 ? ' ' : ''}
+        </Animated.Text>
+      ))}
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  row:  { flexDirection: 'row', flexWrap: 'wrap' },
+  word: { fontSize: 20, fontFamily: 'JetBrainsMono-Regular' },
+})
+```
+
+### Per-character stagger (kinetic type reveal)
+
+Use for headlines, quotes, or dramatic reveals — not body text (too many `Animated.Text` nodes).
+
+```tsx
+interface StaggeredTextProps {
+  text: string
+  style?: object
+  stride?: number  // 20–35ms per character
+}
+
+export function StaggeredChars({ text, style, stride = 25 }: StaggeredTextProps) {
+  return (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+      {[...text].map((char, i) => (
+        <Animated.Text
+          key={i}
+          entering={FadeInDown
+            .delay(i * stride)
+            .duration(300)
+            .reduceMotion(ReduceMotion.System)
+          }
+          style={style}
+        >
+          {char === ' ' ? ' ' : char}  {/* non-breaking space to preserve gaps */}
+        </Animated.Text>
+      ))}
+    </View>
+  )
+}
+```
+
+### Cap the stagger for long strings
+
+A 60-character string at 25ms/char = 1500ms total delay on the last character — far too long. Cap the total:
+
+```tsx
+const MAX_STAGGER_TOTAL = 400  // ms — last character animates by this time
+
+function getStride(text: string, maxTotal = MAX_STAGGER_TOTAL) {
+  return Math.min(25, maxTotal / Math.max(text.length - 1, 1))
+}
+```
+
+### Triggered reveal (not on-mount)
+
+Pass a `trigger` boolean to `key` — a key change forces Reanimated to remount and replay the `entering` animation:
+
+```tsx
+function RevealQuote({ text, visible }: { text: string; visible: boolean }) {
+  const words = text.split(' ')
+
+  if (!visible) return null
+
+  return (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+      {words.map((word, i) => (
+        <Animated.Text
+          key={`${text}-${i}`}  // text change → remount → replay
+          entering={FadeInDown.delay(i * 50).springify().damping(18).reduceMotion(ReduceMotion.System)}
+          style={styles.word}
+        >
+          {word}{' '}
+        </Animated.Text>
+      ))}
+    </View>
+  )
+}
+```
+
+### Rules
+
+- Use **word-level stagger** for sentences and body text. Character-level for 1–3 word headlines only.
+- **stride 40–70ms** for words, **20–30ms** for characters. Emil's rule: snappy enough that the last item arrives within 300–500ms total.
+- Always add `.reduceMotion(ReduceMotion.System)` — 60-character stagger with no reduce-motion handling would scroll through 1.5 seconds of animation for users who need it.
+- `[...text]` (spread) correctly handles emoji and multi-codepoint characters; `.split('')` does not.
+- Each `Animated.Text` is its own view — avoid this for 200+ character blocks (layout cost). For longer text, use a single `Animated.Text` with `entering={FadeIn}` instead.
+- Pair with **JetBrains Mono** at variable weight: set a heavier weight on-enter, animate to target weight after the stagger completes (`cancelAnimation` delay or `setTimeout` on JS thread).
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
