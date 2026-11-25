@@ -12703,6 +12703,377 @@ function RevealQuote({ text, visible }: { text: string; visible: boolean }) {
 
 ---
 
+## Animated Async Button (Reanimated 3)
+
+The state machine: **idle → loading → success/error → idle**. Button width contracts to a circle (spinner visible), then expands back with result feedback. Used for Supabase mutations, form submissions, any async action that needs inline feedback without a modal or toast.
+
+### Core pattern
+
+```tsx
+import { useState } from 'react'
+import { Pressable, ActivityIndicator, Text, StyleSheet } from 'react-native'
+import Animated, {
+  useSharedValue, useAnimatedStyle, useDerivedValue,
+  withSpring, withTiming, withSequence,
+  interpolate, interpolateColor, runOnJS,
+  ReduceMotion,
+} from 'react-native-reanimated'
+import * as Haptics from 'expo-haptics'
+
+type Phase = 'idle' | 'loading' | 'success' | 'error'
+
+const FULL_WIDTH = 240
+const HEIGHT     = 52
+
+function AsyncButton({ label, onPress }: {
+  label: string
+  onPress: () => Promise<void>
+}) {
+  const [phase, setPhase] = useState<Phase>('idle')
+
+  // 1 = full width, 0 = circle
+  const widthFraction = useSharedValue(1)
+  // 0 = idle/loading (zinc), 1 = success (green), -1 = error (red)
+  const colorProgress = useSharedValue(0)
+  const shakeX        = useSharedValue(0)
+  const successScale  = useSharedValue(1)
+
+  const containerStyle = useAnimatedStyle(() => ({
+    width: interpolate(widthFraction.value, [0, 1], [HEIGHT, FULL_WIDTH]),
+    borderRadius: interpolate(widthFraction.value, [0, 1], [HEIGHT / 2, 14]),
+    backgroundColor: interpolateColor(
+      colorProgress.value,
+      [-1, 0, 1],
+      ['#ef4444', '#18181b', '#22c55e'],
+    ),
+    transform: [
+      { translateX: shakeX.value },
+      { scale: successScale.value },
+    ],
+    overflow: 'hidden',
+  }))
+
+  async function trigger() {
+    if (phase !== 'idle') return
+    runOnJS(setPhase)('loading')
+
+    // Contract to circle
+    widthFraction.value = withSpring(0, {
+      damping: 20, stiffness: 350, reduceMotion: ReduceMotion.System,
+    })
+
+    try {
+      await onPress()
+      runOnJS(setPhase)('success')
+      colorProgress.value = withTiming(1, { duration: 180 })
+      successScale.value = withSequence(
+        withSpring(1.1,  { damping: 8,  stiffness: 400, reduceMotion: ReduceMotion.System }),
+        withSpring(1,    { damping: 14, stiffness: 300, reduceMotion: ReduceMotion.System }),
+      )
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+      await new Promise<void>(r => setTimeout(r, 1400))
+    } catch {
+      runOnJS(setPhase)('error')
+      colorProgress.value = withTiming(-1, { duration: 150 })
+      // Shake: alternating translateX, progressively smaller
+      shakeX.value = withSequence(
+        withTiming(-8, { duration: 55 }),
+        withTiming( 8, { duration: 55 }),
+        withTiming(-6, { duration: 55 }),
+        withTiming( 6, { duration: 55 }),
+        withTiming( 0, { duration: 55 }),
+      )
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error)
+      await new Promise<void>(r => setTimeout(r, 1100))
+    }
+
+    // Revert color and expand
+    colorProgress.value = withTiming(0, { duration: 300 })
+    widthFraction.value = withSpring(1, {
+      damping: 18, stiffness: 220, reduceMotion: ReduceMotion.System,
+    })
+    runOnJS(setPhase)('idle')
+  }
+
+  return (
+    <Animated.View style={[styles.container, containerStyle]}>
+      <Pressable onPress={trigger} style={styles.inner} disabled={phase !== 'idle'}>
+        {phase === 'idle'    && <Text style={styles.label}>{label}</Text>}
+        {phase === 'loading' && <ActivityIndicator color="#fff" size="small" />}
+        {phase === 'success' && <Text style={styles.icon}>✓</Text>}
+        {phase === 'error'   && <Text style={styles.icon}>✕</Text>}
+      </Pressable>
+    </Animated.View>
+  )
+}
+
+const styles = StyleSheet.create({
+  container: { alignSelf: 'center', height: HEIGHT },
+  inner:     { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  label:     { color: '#fff', fontFamily: 'JetBrainsMono', fontSize: 15, fontWeight: '500' },
+  icon:      { color: '#fff', fontSize: 20 },
+})
+```
+
+### Rules
+
+- **Guard `if (phase !== 'idle') return`** — prevents double-tap from firing while in flight.
+- **`runOnJS(setPhase)(...)` only** — never call React setState directly in a worklet. All state changes from Reanimated must go through `runOnJS`.
+- **Shake uses `translateX`, not `scale`** — `scale` communicates emphasis; `translateX` communicates "wrong." Progressively smaller oscillations (8→8→6→6→0) feel physical, not mechanical.
+- **`Pressable` inside `Animated.View`**, not the other way around — the pressable handles tap, the view handles visual state.
+- **`disabled={phase !== 'idle'}`** — prevents double-tap at the React level even if the guard is bypassed.
+- **`interpolateColor` on `colorProgress`** — a single shared value maps to three colors cleanly. No conditional backgroundColor.
+- **`ReduceMotion.System`** on contraction/expansion springs — snaps immediately when reduced motion is enabled. The color transition and haptics still run (they communicate state without motion).
+- **Haptics pair with animation phases** — `notificationAsync(Success)` on success, `notificationAsync(Error)` on error. Fires with the visual, not before or after.
+- For web (Framer Motion), use `animate` with variants on a `motion.button` and `AnimatePresence` for the spinner/checkmark content swap:
+
+```tsx
+// Web equivalent — Framer Motion
+function AsyncButtonWeb({ label, onPress }: { label: string; onPress: () => Promise<void> }) {
+  const [phase, setPhase] = useState<Phase>('idle')
+  const isExpanded = phase === 'idle' || phase === 'success' || phase === 'error'
+
+  async function trigger() {
+    if (phase !== 'idle') return
+    setPhase('loading')
+    try {
+      await onPress()
+      setPhase('success')
+      await new Promise<void>(r => setTimeout(r, 1400))
+    } catch {
+      setPhase('error')
+      await new Promise<void>(r => setTimeout(r, 1100))
+    }
+    setPhase('idle')
+  }
+
+  const bgColor = { idle: '#18181b', loading: '#18181b', success: '#22c55e', error: '#ef4444' }
+
+  return (
+    <motion.button
+      onClick={trigger}
+      disabled={phase !== 'idle'}
+      animate={{
+        width: isExpanded ? 240 : 52,
+        borderRadius: isExpanded ? 14 : 26,
+        backgroundColor: bgColor[phase],
+        x: phase === 'error' ? [0, -8, 8, -6, 6, 0] : 0,
+      }}
+      transition={{
+        width:    { type: 'spring', stiffness: 350, damping: 20 },
+        x:        { duration: 0.28, times: [0, 0.2, 0.4, 0.6, 0.8, 1] },
+        default:  { duration: 0.2 },
+      }}
+      style={{ height: 52, overflow: 'hidden' }}
+    >
+      <AnimatePresence mode="wait">
+        <motion.span
+          key={phase}
+          initial={{ opacity: 0, scale: 0.8 }}
+          animate={{ opacity: 1, scale: phase === 'success' ? [1, 1.15, 1] : 1 }}
+          exit={{ opacity: 0, scale: 0.8 }}
+          transition={{ duration: 0.15 }}
+        >
+          {phase === 'idle' && label}
+          {phase === 'loading' && <Spinner />}
+          {phase === 'success' && '✓'}
+          {phase === 'error' && '✕'}
+        </motion.span>
+      </AnimatePresence>
+    </motion.button>
+  )
+}
+```
+
+---
+
+## Shimmer / Gradient Sweep Text
+
+A bright highlight that sweeps across text — loading placeholder tone, section headers in ambient mode, the phosphor glow aesthetic. Keep it to headlines and decorative moments; never on body text.
+
+### Web — pure CSS (zero JS)
+
+```css
+/* Bright stripe sweeps left → right, loops */
+@keyframes shimmer-sweep {
+  from { background-position: -200% center; }
+  to   { background-position:  200% center; }
+}
+
+.shimmer-text {
+  /* Gradient: base → highlight → base, wide enough that the stripe is distinct */
+  background: linear-gradient(
+    90deg,
+    #52525b 35%,    /* zinc-600 — base color */
+    #d4d4d8 50%,    /* zinc-300 — highlight */
+    #52525b 65%
+  );
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: shimmer-sweep 2.4s linear infinite;
+}
+
+/* Loading placeholder variant — subtle, not glitzy */
+.shimmer-placeholder {
+  background: linear-gradient(
+    90deg,
+    #27272a 40%,   /* zinc-800 */
+    #3f3f46 50%,   /* zinc-700 */
+    #27272a 60%
+  );
+  background-size: 300% auto;
+  animation: shimmer-sweep 1.6s ease-in-out infinite;
+  /* Apply to a rounded <div> for a skeleton text block */
+  border-radius: 4px;
+}
+
+/* Reduced motion: remove sweep, keep base color */
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-text, .shimmer-placeholder {
+    animation: none;
+    background: none;
+    color: #52525b;
+  }
+}
+```
+
+### Web — cursor-proximity shimmer (Framer Motion)
+
+Highlight moves to follow the cursor — the glow chases where the user is looking. Zero re-renders.
+
+```tsx
+import { useRef } from 'react'
+import { useMotionValue, useMotionTemplate, motion } from 'framer-motion'
+import { useReducedMotion } from 'framer-motion'
+
+function ProximityShimmer({ children, className }: { children: string; className?: string }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  const bgX = useMotionValue(50)       // percentage across the element
+  const prefersReduced = useReducedMotion()
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!ref.current || prefersReduced) return
+    const { left, width } = ref.current.getBoundingClientRect()
+    bgX.set(((e.clientX - left) / width) * 100)
+  }
+
+  // Gradient: a 30%-wide highlight window centered at bgX%
+  // Uses calc() so it's recomputed on the compositor — no JS per frame
+  const bg = useMotionTemplate`linear-gradient(
+    90deg,
+    #52525b calc(${bgX}% - 15%),
+    #e4e4e7 ${bgX}%,
+    #52525b calc(${bgX}% + 15%)
+  )`
+
+  if (prefersReduced) return <span className={className}>{children}</span>
+
+  return (
+    <motion.span
+      ref={ref}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={() => bgX.set(50)}  // reset to center on leave
+      style={{
+        backgroundImage: bg,
+        backgroundClip: 'text',
+        WebkitBackgroundClip: 'text',
+        color: 'transparent',
+        display: 'inline-block',
+      } as React.CSSProperties}
+      className={className}
+    >
+      {children}
+    </motion.span>
+  )
+}
+```
+
+### React Native — MaskedView + animated gradient
+
+```tsx
+import { useEffect } from 'react'
+import { Text, TextStyle } from 'react-native'
+import Animated, {
+  useSharedValue, useAnimatedProps,
+  withRepeat, withTiming, Easing,
+  ReduceMotion,
+} from 'react-native-reanimated'
+import { LinearGradient } from 'expo-linear-gradient'
+import MaskedView from '@react-native-masked-view/masked-view'
+
+// Must be module-scope — Animated.createAnimatedComponent inside a component causes
+// a new class on every render, breaking the animation
+const AnimatedGradient = Animated.createAnimatedComponent(LinearGradient)
+
+function ShimmerText({ children, style }: { children: string; style?: TextStyle }) {
+  const sweep = useSharedValue(-1) // -1 = gradient entirely off-left; 1 = entirely off-right
+
+  useEffect(() => {
+    sweep.value = withRepeat(
+      withTiming(1, {
+        duration: 1800,
+        easing: Easing.linear,
+        reduceMotion: ReduceMotion.System,
+      }),
+      -1,
+      false, // no reverse — restart from -1 each loop
+    )
+  }, [])
+
+  const gradientProps = useAnimatedProps(() => ({
+    // start and end define the gradient's left/right edges in normalized [0,1] space
+    // Sweep the gradient window (width = 1.0) across the full range [-0.5, 1.5]
+    start: { x: sweep.value * 0.5 + 0.25, y: 0 },
+    end:   { x: sweep.value * 0.5 + 0.75, y: 0 },
+  }))
+
+  const fontSize = style?.fontSize ?? 16
+  const lineHeight = fontSize * 1.4
+
+  return (
+    <MaskedView
+      maskElement={<Text style={[style, { color: '#000' }]}>{children}</Text>}
+    >
+      <AnimatedGradient
+        animatedProps={gradientProps}
+        colors={['#3f3f46', '#d4d4d8', '#3f3f46']}
+        locations={[0.2, 0.5, 0.8]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0 }}
+        style={{ width: '100%', height: lineHeight }}
+      />
+    </MaskedView>
+  )
+}
+```
+
+### Rules
+
+- **CSS first on web** — `background-clip: text` + `@keyframes` is GPU-composited and zero-dependency. Only reach for Framer Motion when the shimmer is cursor-reactive or tied to other motion values.
+- **Never on body text** — shimmer on paragraph text is exhausting. Headlines, loading skeletons, and decorative type only.
+- **`background-size: 200% auto`** (CSS) — without it, the gradient is static. `200%` gives the stripe enough room to travel across the element's full width.
+- **Window width ~30% of element** — the gradient band `base 35%, highlight 50%, base 65%`. Too narrow (`48%–52%`) makes the shine invisible; too wide (`0%, 50%, 100%`) is garish.
+- **React Native: `Animated.createAnimatedComponent(LinearGradient)` at module scope** — if declared inside the component function, a new animated component class is created on every render, breaking the animation and causing flicker.
+- **React Native: `MaskedView` requires `@react-native-masked-view/masked-view`** — not in Expo's default package set; `npx expo install @react-native-masked-view/masked-view`.
+- **`ReduceMotion.System`** on the timing — snaps to resting gradient immediately.
+- For loading skeletons (not text), skip `MaskedView` entirely — use a plain `Animated.View` with `backgroundColor` interpolating between two gray shades:
+
+```tsx
+// Simpler skeleton block — no mask needed
+const shimmerColor = useAnimatedStyle(() => ({
+  backgroundColor: interpolateColor(
+    sweep.value,
+    [-1, 0, 1],
+    ['#27272a', '#3f3f46', '#27272a'],
+  ),
+}))
+// Apply to a View with height/borderRadius — no text, no mask overhead
+```
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
