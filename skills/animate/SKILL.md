@@ -13074,6 +13074,185 @@ const shimmerColor = useAnimatedStyle(() => ({
 
 ---
 
+## Frosted Glass Scroll Header (expo-blur + Reanimated 3)
+
+The iOS standard: a header that starts transparent and gains blur + background opacity as the user scrolls. The blur intensifies progressively — it doesn't snap on. `expo-blur`'s `intensity` prop is not a style so it needs `useAnimatedProps`.
+
+```tsx
+import { useRef } from 'react'
+import { StyleSheet, View } from 'react-native'
+import Animated, {
+  useAnimatedProps, useAnimatedStyle, useScrollViewOffset,
+  useAnimatedRef, interpolate, Extrapolation,
+} from 'react-native-reanimated'
+import { BlurView } from 'expo-blur'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
+
+const AnimatedBlur = Animated.createAnimatedComponent(BlurView)
+// Module scope — never createAnimatedComponent inside a component
+
+const BLUR_START = 0    // scroll offset where blur begins
+const BLUR_END   = 72   // offset where blur reaches max intensity
+
+function FrostedHeader({ title }: { title: string }) {
+  const { top } = useSafeAreaInsets()
+  const scrollRef = useAnimatedRef<Animated.ScrollView>()
+  const scrollOffset = useScrollViewOffset(scrollRef)
+
+  // expo-blur intensity is a prop — requires useAnimatedProps
+  const blurProps = useAnimatedProps(() => ({
+    intensity: interpolate(
+      scrollOffset.value,
+      [BLUR_START, BLUR_END],
+      [0, 55],
+      Extrapolation.CLAMP,
+    ),
+  }))
+
+  // Semi-transparent background fades in alongside blur (belt-and-suspenders for Android)
+  const bgStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      scrollOffset.value,
+      [BLUR_START, BLUR_END],
+      [0, 1],
+      Extrapolation.CLAMP,
+    ),
+  }))
+
+  // Bottom border fades in when scrolled — signals there's content above
+  const borderStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      scrollOffset.value,
+      [BLUR_START / 2, BLUR_END / 2],
+      [0, 1],
+      Extrapolation.CLAMP,
+    ),
+  }))
+
+  return (
+    <View style={{ flex: 1 }}>
+      {/* Scroll content */}
+      <Animated.ScrollView
+        ref={scrollRef}
+        scrollEventThrottle={16}
+        contentContainerStyle={{ paddingTop: top + 56 }}
+      >
+        {/* … page content */}
+      </Animated.ScrollView>
+
+      {/* Header sits above the scroll content, absolutely positioned */}
+      <View
+        style={[styles.header, { paddingTop: top }]}
+        pointerEvents="none"
+      >
+        {/* Blur layer (iOS) */}
+        <AnimatedBlur
+          animatedProps={blurProps}
+          tint="dark"
+          style={StyleSheet.absoluteFill}
+        />
+        {/* Dark tint (Android fallback + depth on iOS) */}
+        <Animated.View
+          style={[StyleSheet.absoluteFill, styles.headerBg, bgStyle]}
+        />
+        {/* Bottom border */}
+        <Animated.View style={[styles.border, borderStyle]} />
+      </View>
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  header: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0,
+    height: 56 + /* safe-area injected via paddingTop */ 0,
+    overflow: 'hidden',
+    zIndex: 10,
+  },
+  headerBg: {
+    backgroundColor: 'rgba(10,10,10,0.72)',
+  },
+  border: {
+    position: 'absolute',
+    bottom: 0, left: 0, right: 0,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+})
+```
+
+### Rules
+
+- **`AnimatedBlur` at module scope** — `createAnimatedComponent(BlurView)` inside a component creates a new class every render and breaks the animation.
+- **`expo-blur` is iOS-only for real blur** — on Android, `BlurView` renders a plain background. Always pair with the `headerBg` opacity layer so Android gets the right feel without blur.
+- **`scrollEventThrottle={16}`** — required even with `useScrollViewOffset`; without it the native driver doesn't dispatch scroll events at 60fps.
+- **`pointerEvents="none"` on the header** — the content underneath should still be tappable. Only add it back if the header has interactive elements.
+- **`BLUR_END: 72`** — set to roughly 1–1.5× the header height so the effect completes right as the first content row passes behind it.
+- **Don't set `intensity` above 70** — above 70 on iOS the blur becomes opaque white/grey and reads as a bug, not glass.
+- **`tint`** options: `"dark"` (zinc-on-zinc), `"light"` (white glass), `"extraLight"`, `"systemChromeMaterial"` (best-match iOS system material).
+
+---
+
+## `InteractionManager.runAfterInteractions` — Defer Work Until Navigation Settles
+
+React Native's navigation transitions are JS-driven. Expensive initial-render animations (skeleton → content, staggered list entry, heavy scroll-driven setup) that start simultaneously with a screen push compete with the transition animation and make both look janky.
+
+`InteractionManager.runAfterInteractions` queues a task until all ongoing interactions (gestures, transitions) are done.
+
+```tsx
+import { useEffect } from 'react'
+import { InteractionManager } from 'react-native'
+import Animated, {
+  useSharedValue, withTiming, withDelay, Easing,
+} from 'react-native-reanimated'
+
+function ArticleScreen() {
+  const contentOpacity = useSharedValue(0)
+  const contentY       = useSharedValue(16)
+
+  useEffect(() => {
+    // Don't start the content entrance until the push transition finishes
+    const task = InteractionManager.runAfterInteractions(() => {
+      contentOpacity.value = withTiming(1, { duration: 280, easing: Easing.out(Easing.cubic) })
+      contentY.value       = withTiming(0, { duration: 280, easing: Easing.out(Easing.cubic) })
+    })
+    return () => task.cancel()   // cancel if component unmounts before it fires
+  }, [])
+
+  const style = useAnimatedStyle(() => ({
+    opacity: contentOpacity.value,
+    transform: [{ translateY: contentY.value }],
+  }))
+
+  return <Animated.View style={style}>{/* article content */}</Animated.View>
+}
+```
+
+### With a loading state (skeleton → content)
+
+```tsx
+useEffect(() => {
+  const task = InteractionManager.runAfterInteractions(async () => {
+    const data = await fetchArticle(id)   // safe — transition is done, no jank risk
+    setArticle(data)
+    contentOpacity.value = withTiming(1, { duration: 220 })
+  })
+  return () => task.cancel()
+}, [id])
+```
+
+### Rules
+
+- **Always `return () => task.cancel()`** — if the user navigates back before the callback fires, the component unmounts and the callback must not run; cancelling prevents setState-on-unmounted-component warnings and ghost animations.
+- **Only for initial-mount animations** — ongoing interaction animations (gestures, scroll-linked) must NOT be deferred. `InteractionManager` is for the first-render setup only.
+- **Pairs with Expo Router's Stack transitions** — Expo Router's native slide transitions are registered as interactions. `runAfterInteractions` fires ~16ms after the transition animation completes, not after any JS tick.
+- **Don't defer data fetches that must start immediately** — if data latency is the bottleneck, fetch immediately and only defer the *reveal animation* to after the transition. The pattern above fetches after, which is simpler but slower; for fast APIs it's fine.
+- **Stagger entry animations also benefit** — if you have 10 cards entering with staggered `withDelay`, starting them inside `runAfterInteractions` means the stagger begins crisp, not buried under a mid-transition frame budget.
+- **`InteractionManager.createInteractionHandle()`** — the inverse: tell React Native "I'm about to do something interactive" so other work doesn't start. Use when you trigger a programmatic animation that should block other work from starting (rare).
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
