@@ -13251,6 +13251,92 @@ useEffect(() => {
 - **Stagger entry animations also benefit** — if you have 10 cards entering with staggered `withDelay`, starting them inside `runAfterInteractions` means the stagger begins crisp, not buried under a mid-transition frame budget.
 - **`InteractionManager.createInteractionHandle()`** — the inverse: tell React Native "I'm about to do something interactive" so other work doesn't start. Use when you trigger a programmatic animation that should block other work from starting (rare).
 
+## Contemplative Screen Entrance Choreography (Reanimated 3)
+
+For apps where content deserves attention — question viewers, journals, reflection prompts, quote apps — the entrance should be a slow, sequenced reveal, not a task-app pop-in. Each element group has a role; they enter in waves, not simultaneously.
+
+**Pattern: role-driven wave sequence**
+1. **Primary content** (question text, main idea) — enters first, 0ms delay, 450ms ease-in-out
+2. **Context layer** (source, author, date) — enters second, 220ms delay, 400ms ease-in-out
+3. **Actions** (save, share, navigate) — enters last, 440ms delay, 350ms ease-out
+
+This is NOT a 20-60ms stagger (task-app timing). Use 200ms+ group offsets. The slowness is intentional — it signals "this deserves your attention", not "complete this action."
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedStyle, withTiming, withDelay,
+  Easing,
+} from 'react-native-reanimated'
+import { useFocusEffect } from 'expo-router'
+import { useCallback } from 'react'
+import { InteractionManager } from 'react-native'
+
+const CONTEMPLATIVE = { easing: Easing.inOut(Easing.cubic) } as const
+
+function useContemplatveEntrance(delayMs = 0, durationMs = 420) {
+  const opacity    = useSharedValue(0)
+  const translateY = useSharedValue(10)
+
+  useFocusEffect(
+    useCallback(() => {
+      const task = InteractionManager.runAfterInteractions(() => {
+        opacity.value    = withDelay(delayMs, withTiming(1, { duration: durationMs, ...CONTEMPLATIVE }))
+        translateY.value = withDelay(delayMs, withTiming(0, { duration: durationMs, ...CONTEMPLATIVE }))
+      })
+      return () => {
+        task.cancel()
+        opacity.value    = 0
+        translateY.value = 10
+      }
+    }, [])
+  )
+
+  return useAnimatedStyle(() => ({
+    opacity: opacity.value,
+    transform: [{ translateY: translateY.value }],
+  }))
+}
+
+// Usage — question detail screen
+export default function QuestionScreen({ question }: { question: Question }) {
+  const questionStyle = useContemplatveEntrance(0, 450)    // primary: in first
+  const sourceStyle   = useContemplatveEntrance(220, 400)  // context: second wave
+  const actionsStyle  = useContemplatveEntrance(440, 350)  // actions: last wave
+
+  return (
+    <View style={{ flex: 1, padding: 24 }}>
+      {/* Primary: the question itself */}
+      <Animated.View style={questionStyle}>
+        <Text style={styles.questionText}>{question.text}</Text>
+      </Animated.View>
+
+      {/* Context: source, collection, date */}
+      <Animated.View style={[sourceStyle, { marginTop: 24 }]}>
+        <Text style={styles.sourceMeta}>{question.source} · {question.date}</Text>
+      </Animated.View>
+
+      {/* Actions: save to collection, share */}
+      <Animated.View style={[actionsStyle, { marginTop: 'auto' }]}>
+        <ActionBar question={question} />
+      </Animated.View>
+    </View>
+  )
+}
+```
+
+**Why `Easing.inOut(Easing.cubic)` over ease-out here**: ease-out feels responsive (UI snapping to your intent). ease-in-out feels like content *appearing* on its own — the easing matches the contemplative register. Use ease-out for buttons, ease-in-out for content.
+
+**Why `InteractionManager` + `useFocusEffect`**: the transition animation (screen push) must finish before the content entrance begins. Without `InteractionManager`, the content fadeIn and the screen slide compete for frame budget. `useFocusEffect` ensures the animation replays every visit — a returning user sees the content settle again, reinforcing the deliberate pace.
+
+**When to use fast stagger instead**: if the screen shows a list of questions (feed/collection), use 20-40ms stagger with 250ms duration. Fast stagger is for scanning; slow wave entrance is for reading a single item. Never apply contemplative timing to list rows — it makes the feed feel broken.
+
+### Rules
+
+- **Never exceed 500ms** for the first wave — 450ms is the sweet spot. Beyond that it feels like a load delay.
+- **Keep `translateY` small (8-12px)** — the content isn't entering from off-screen, it's materializing. A large translateY looks like a task app.
+- **Pair with `useFocusEffect` + `InteractionManager`** — both are required. One without the other causes either replay issues or jank.
+- **The exit is usually instant** — just reset values in the cleanup return. A slow fade-out on navigation back is jarring; the user is already moving to the next screen.
+
 ---
 
 When building an animation, always:
