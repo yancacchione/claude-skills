@@ -13339,6 +13339,153 @@ export default function QuestionScreen({ question }: { question: Question }) {
 
 ---
 
+## Animated Pagination Dots (Reanimated 3)
+
+The iOS-standard scroll position indicator for horizontal pagers, card decks, and onboarding flows. The active dot expands horizontally (pill shape); inactive dots shrink to a circle. Driven entirely by a scroll offset shared value — no `useState`, no JS-side index tracking.
+
+**When to use**: horizontal `FlatList`/`ScrollView` with `pagingEnabled`, card swipe stacks (motamo question deck, onboarding), any sequence where the user needs to know position and count at a glance.
+
+```tsx
+import Animated, {
+  useSharedValue, useAnimatedScrollHandler, useAnimatedStyle,
+  interpolate, Extrapolation, withSpring,
+} from 'react-native-reanimated'
+import { FlatList, View, StyleSheet, useWindowDimensions } from 'react-native'
+
+// --- Dot constants ---
+const DOT_SIZE     = 7    // inactive dot diameter
+const DOT_ACTIVE_W = 20   // active dot pill width
+const DOT_SPACING  = 6    // gap between dots
+const DOT_COLOR    = 'rgba(255,255,255,0.35)'
+const DOT_ACTIVE_C = '#fff'
+
+// --- Single dot ---
+function Dot({ index, scrollX, pageWidth }: {
+  index: number
+  scrollX: Animated.SharedValue<number>
+  pageWidth: number
+}) {
+  const style = useAnimatedStyle(() => {
+    const input = [(index - 1) * pageWidth, index * pageWidth, (index + 1) * pageWidth]
+
+    const width = interpolate(
+      scrollX.value,
+      input,
+      [DOT_SIZE, DOT_ACTIVE_W, DOT_SIZE],
+      Extrapolation.CLAMP,
+    )
+    const opacity = interpolate(
+      scrollX.value,
+      input,
+      [0.35, 1, 0.35],
+      Extrapolation.CLAMP,
+    )
+    return { width, opacity }
+  })
+
+  return <Animated.View style={[styles.dot, style]} />
+}
+
+// --- Indicator row ---
+export function PaginationDots({
+  count,
+  scrollX,
+  pageWidth,
+}: {
+  count: number
+  scrollX: Animated.SharedValue<number>
+  pageWidth: number
+}) {
+  return (
+    <View style={styles.row}>
+      {Array.from({ length: count }, (_, i) => (
+        <Dot key={i} index={i} scrollX={scrollX} pageWidth={pageWidth} />
+      ))}
+    </View>
+  )
+}
+
+// --- Pager screen ---
+export function CardPager({ pages }: { pages: Page[] }) {
+  const { width } = useWindowDimensions()
+  const scrollX   = useSharedValue(0)
+
+  const onScroll = useAnimatedScrollHandler({
+    onScroll: (e) => {
+      scrollX.value = e.contentOffset.x
+    },
+  })
+
+  return (
+    <View style={{ flex: 1 }}>
+      <Animated.FlatList
+        data={pages}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        keyExtractor={(_, i) => String(i)}
+        renderItem={({ item }) => (
+          <View style={{ width }}>
+            <PageCard page={item} />
+          </View>
+        )}
+      />
+      <PaginationDots count={pages.length} scrollX={scrollX} pageWidth={width} />
+    </View>
+  )
+}
+
+const styles = StyleSheet.create({
+  dot: {
+    height: DOT_SIZE,
+    borderRadius: DOT_SIZE / 2,
+    backgroundColor: DOT_ACTIVE_C,
+    marginHorizontal: DOT_SPACING / 2,
+  },
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 16,
+  },
+})
+```
+
+### Variant: dots driven by swipe card index (not scroll offset)
+
+For a manual swipe-stack (not a `FlatList` with `pagingEnabled`), drive dots from an integer `activeIndex` shared value instead of `scrollX`. Interpolate over `[-1, 0, 1]` relative to current index:
+
+```tsx
+function Dot({ index, activeIndex }: {
+  index: number
+  activeIndex: Animated.SharedValue<number>
+}) {
+  const style = useAnimatedStyle(() => {
+    const delta = activeIndex.value - index
+    const width = interpolate(Math.abs(delta), [0, 1], [DOT_ACTIVE_W, DOT_SIZE], Extrapolation.CLAMP)
+    const opacity = interpolate(Math.abs(delta), [0, 1], [1, 0.35], Extrapolation.CLAMP)
+    return { width, opacity }
+  })
+  return <Animated.View style={[styles.dot, style]} />
+}
+
+// In the swipe-card gesture onEnd: activeIndex.value = newIndex (integer)
+// Or use withSpring for a soft snap: activeIndex.value = withSpring(newIndex, { damping: 20 })
+```
+
+### Rules
+
+- **`scrollEventThrottle={16}`** — required. Without it, the native driver batches scroll events and dots stutter.
+- **Never interpolate over `count` values in one `interpolate` call** — it gets slow for large arrays. Only interpolate the `[-1, 0, 1]` relative window; each dot does its own calculation.
+- **Keep `DOT_ACTIVE_W` ≤ 3× `DOT_SIZE`** — wider pills look like a progress bar, not a position indicator.
+- **For dark-on-light screens** — flip: `DOT_COLOR = 'rgba(0,0,0,0.25)'`, `DOT_ACTIVE_C = 'rgba(0,0,0,0.75)'`. Never use pure black — it reads as an error state.
+- **Cap visible dots at ~7** — if `count > 7`, switch to a mini-map (a strip that scrolls) or a plain `n / total` counter. Expanding dots beyond 7 items become hard to scan.
+- **Contemplative pager spacing** — in a question/reflection context, increase `DOT_SPACING` to 10 and reduce `DOT_SIZE` to 5 for a more airy, less app-like indicator row.
+
+---
+
 When building an animation, always:
 1. State which library/approach and why (one sentence)
 2. Show the complete, copy-pasteable code (no placeholders)
